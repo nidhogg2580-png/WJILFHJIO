@@ -873,7 +873,7 @@ elif step == 5:
             st.rerun()
         st.stop()
 
-    groups = analysis["groups"]
+    groups    = analysis["groups"]
     group_dfs = analysis["group_dfs"]
 
     # 统计摘要
@@ -908,8 +908,8 @@ elif step == 5:
             st.markdown("**Cox：** 单变量（无协变量调整）")
 
     st.markdown("---")
-    st.subheader("🎨 图形调整与下载")
-    st.markdown("调整下方参数后点击「**重新生成图形**」预览，满意后下载。")
+    st.subheader("🎨 图形实时调整与下载")
+    st.caption("调整下方任意参数后，预览图将自动更新。")
 
     col_back, _ = st.columns([1, 5])
     with col_back:
@@ -917,99 +917,54 @@ elif step == 5:
             st.session_state["step"] = 4
             st.rerun()
 
-    # ── 调整控件 ──
-    with st.expander("🔧 位置与显示调整", expanded=True):
-        c1, c2 = st.columns(2)
-        with c1:
-            text_x = st.slider("中位时间框 X", 0.0, 0.85, st.session_state["text_x"], 0.01)
-            text_y = st.slider("中位时间框 Y", 0.10, 0.98, st.session_state["text_y"], 0.01)
-        with c2:
-            leg_x = st.slider("图例位置 X", 0.0, 1.0, st.session_state["leg_x"], 0.01)
-            leg_y = st.slider("图例位置 Y", 0.0, 1.0, st.session_state["leg_y"], 0.01)
+    # ── 左右分栏：左侧控件，右侧实时预览 ──
+    col_ctrl, col_prev = st.columns([1, 2], gap="large")
 
-        show_ci = st.checkbox("显示 95% 置信区间色带", value=st.session_state["show_ci"])
+    with col_ctrl:
+        st.markdown("#### 🔧 位置与显示")
+        # 使用 key= 直接绑定 session_state，每次拖动自动触发 rerun
+        st.slider("中位时间框 X", 0.0, 0.85, step=0.01, key="text_x")
+        st.slider("中位时间框 Y", 0.10, 0.98, step=0.01, key="text_y")
+        st.slider("图例位置 X",   0.0,  1.0,  step=0.01, key="leg_x")
+        st.slider("图例位置 Y",   0.0,  1.0,  step=0.01, key="leg_y")
+        st.checkbox("显示 95% 置信区间色带", key="show_ci")
 
         if len(groups) >= 3:
+            st.markdown("**整体 Log-rank 框位置**")
             c3, c4 = st.columns(2)
             with c3:
-                lr_x = st.slider("整体检验框 X", 0.01, 0.99, st.session_state["lr_x"], 0.01)
+                st.slider("X", 0.01, 0.99, step=0.01, key="lr_x", label_visibility="collapsed")
             with c4:
-                lr_y = st.slider("整体检验框 Y", 0.01, 0.97, st.session_state["lr_y"], 0.01)
-        else:
-            lr_x = st.session_state["lr_x"]
-            lr_y = st.session_state["lr_y"]
+                st.slider("Y", 0.01, 0.97, step=0.01, key="lr_y", label_visibility="collapsed")
+            st.caption("↑ 整体检验框 X / Y")
 
-    with st.expander("📝 文字内容编辑", expanded=True):
-        median_text = st.text_area(
-            "中位时间文字（第1行为加粗标题，其余行为各组数据，可自由编辑）",
-            value=st.session_state["median_text"],
-            height=120,
+        st.markdown("#### 📝 文字内容")
+        st.text_area(
+            "中位时间文字（第1行加粗标题，其余行各组数据）",
+            height=110,
+            key="median_text",
         )
-        hr_text = st.text_area(
-            "HR / P 值文字（每行一条，全部删除则不显示）",
-            value=st.session_state["hr_text"],
-            height=120,
+        st.text_area(
+            "HR / P 值文字（每行一条，清空则不显示）",
+            height=110,
+            key="hr_text",
         )
         if len(groups) >= 3:
-            lr_text = st.text_area(
+            st.text_area(
                 "Log-rank 整体检验文字（可编辑，清空则不显示）",
-                value=st.session_state["lr_text"],
-                height=60,
+                height=55,
+                key="lr_text",
             )
-        else:
-            lr_text = ""
 
-    # ── 生成图形按钮 ──
-    if st.button("🔄 重新生成图形", type="primary", key="btn_regenerate"):
-        st.session_state["text_x"]      = text_x
-        st.session_state["text_y"]      = text_y
-        st.session_state["leg_x"]       = leg_x
-        st.session_state["leg_y"]       = leg_y
-        st.session_state["lr_x"]        = lr_x
-        st.session_state["lr_y"]        = lr_y
-        st.session_state["show_ci"]     = show_ci
-        st.session_state["median_text"] = median_text
-        st.session_state["hr_text"]     = hr_text
-        st.session_state["lr_text"]     = lr_text
-
+    # ── 实时渲染（每次 rerun 都重绘，无需按钮）──
+    with col_prev:
+        st.markdown("#### 👁 实时预览")
         _setup_font(lang=st.session_state["lang"])
 
-        median_lines = [l for l in median_text.split("\n")]
-        hr_lines     = [l for l in hr_text.split("\n") if l.strip()]
-
-        state_snap = {
-            "x_max":     st.session_state["x_max"],
-            "x_ticks":   st.session_state["x_ticks"],
-            "x_data_max": st.session_state["x_data_max"],
-            "x_label":   st.session_state["x_label"],
-            "y_label":   st.session_state["y_label"],
-            "lang":      st.session_state["lang"],
-            "show_ci":   show_ci,
-        }
-
-        with st.spinner("正在渲染图形……"):
-            result = build_figure(
-                analysis=analysis,
-                state=state_snap,
-                text_x=text_x,
-                text_y=text_y,
-                median_text_override=median_lines if median_lines else None,
-                hr_text_override=hr_lines,
-                logrank_text_override=lr_text if len(groups) >= 3 else None,
-                lr_x=lr_x,
-                lr_y=lr_y,
-                show_ci=show_ci,
-                legend_x=leg_x,
-                legend_y=leg_y,
-            )
-            st.session_state["_last_png"] = result["png"]
-            st.session_state["_last_pdf"] = result["pdf"]
-
-    # ── 初次自动渲染 ──
-    if "_last_png" not in st.session_state:
-        _setup_font(lang=st.session_state["lang"])
         median_lines = [l for l in st.session_state["median_text"].split("\n")]
         hr_lines     = [l for l in st.session_state["hr_text"].split("\n") if l.strip()]
+        lr_text_val  = st.session_state.get("lr_text", "") if len(groups) >= 3 else ""
+
         state_snap = {
             "x_max":      st.session_state["x_max"],
             "x_ticks":    st.session_state["x_ticks"],
@@ -1019,7 +974,8 @@ elif step == 5:
             "lang":       st.session_state["lang"],
             "show_ci":    st.session_state["show_ci"],
         }
-        with st.spinner("正在渲染图形……"):
+
+        with st.spinner("渲染中…"):
             result = build_figure(
                 analysis=analysis,
                 state=state_snap,
@@ -1027,27 +983,22 @@ elif step == 5:
                 text_y=st.session_state["text_y"],
                 median_text_override=median_lines if median_lines else None,
                 hr_text_override=hr_lines,
-                logrank_text_override=st.session_state["lr_text"] if len(groups) >= 3 else None,
+                logrank_text_override=lr_text_val if len(groups) >= 3 else None,
                 lr_x=st.session_state["lr_x"],
                 lr_y=st.session_state["lr_y"],
                 show_ci=st.session_state["show_ci"],
                 legend_x=st.session_state["leg_x"],
                 legend_y=st.session_state["leg_y"],
             )
-            st.session_state["_last_png"] = result["png"]
-            st.session_state["_last_pdf"] = result["pdf"]
 
-    # ── 显示图形 ──
-    if "_last_png" in st.session_state:
-        st.markdown("### 预览")
-        st.image(st.session_state["_last_png"], use_container_width=True)
+        st.image(result["png"], use_container_width=True)
 
-        st.markdown("### ⬇️ 下载")
+        st.markdown("#### ⬇️ 下载")
         dl_col1, dl_col2 = st.columns(2)
         with dl_col1:
             st.download_button(
                 label="⬇️ 下载 PNG",
-                data=st.session_state["_last_png"],
+                data=result["png"],
                 file_name="survival_curve.png",
                 mime="image/png",
                 type="primary",
@@ -1055,7 +1006,7 @@ elif step == 5:
         with dl_col2:
             st.download_button(
                 label="⬇️ 下载 PDF",
-                data=st.session_state["_last_pdf"],
+                data=result["pdf"],
                 file_name="survival_curve.pdf",
                 mime="application/pdf",
             )
