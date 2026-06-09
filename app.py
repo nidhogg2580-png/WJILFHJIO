@@ -923,19 +923,19 @@ elif step == 5:
     with col_ctrl:
         st.markdown("#### 🔧 位置与显示")
         # 使用 key= 直接绑定 session_state，每次拖动自动触发 rerun
-        st.slider("中位时间框 X", 0.0, 0.85, step=0.01, key="text_x")
-        st.slider("中位时间框 Y", 0.10, 0.98, step=0.01, key="text_y")
-        st.slider("图例位置 X",   0.0,  1.0,  step=0.01, key="leg_x")
-        st.slider("图例位置 Y",   0.0,  1.0,  step=0.01, key="leg_y")
+        st.slider("中位时间框 X", 0.0, 0.85, value=st.session_state["text_x"], step=0.01, key="text_x")
+        st.slider("中位时间框 Y", 0.10, 0.98, value=st.session_state["text_y"], step=0.01, key="text_y")
+        st.slider("图例位置 X",   0.0,  1.0,  value=st.session_state["leg_x"],  step=0.01, key="leg_x")
+        st.slider("图例位置 Y",   0.0,  1.0,  value=st.session_state["leg_y"],  step=0.01, key="leg_y")
         st.checkbox("显示 95% 置信区间色带", key="show_ci")
 
         if len(groups) >= 3:
             st.markdown("**整体 Log-rank 框位置**")
             c3, c4 = st.columns(2)
             with c3:
-                st.slider("X", 0.01, 0.99, step=0.01, key="lr_x", label_visibility="collapsed")
+                st.slider("X", 0.01, 0.99, value=st.session_state["lr_x"], step=0.01, key="lr_x", label_visibility="collapsed")
             with c4:
-                st.slider("Y", 0.01, 0.97, step=0.01, key="lr_y", label_visibility="collapsed")
+                st.slider("Y", 0.01, 0.97, value=st.session_state["lr_y"], step=0.01, key="lr_y", label_visibility="collapsed")
             st.caption("↑ 整体检验框 X / Y")
 
         st.markdown("#### 📝 文字内容")
