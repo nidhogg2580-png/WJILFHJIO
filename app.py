@@ -105,9 +105,9 @@ def _setup_font(lang="en"):
     available = {f.name for f in fm.fontManager.ttflist}
     _BASE_FONTSIZE = 14
 
- if lang == "zh":
+    if lang == "zh":
     # 仅使用可自由商业使用或开源字体
-    zh_candidates = [
+     zh_candidates = [
         "Noto Serif SC",
         "Source Han Serif SC",
         "Noto Sans CJK SC",
@@ -162,8 +162,8 @@ def _setup_font(lang="en"):
 
         return "default"
 
-else:
-    _fs = {
+    else:
+     _fs = {
         "font.size": _BASE_FONTSIZE - 1,
         "axes.titlesize": _BASE_FONTSIZE,
         "axes.labelsize": _BASE_FONTSIZE,
