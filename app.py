@@ -105,64 +105,89 @@ def _setup_font(lang="en"):
     available = {f.name for f in fm.fontManager.ttflist}
     _BASE_FONTSIZE = 14
 
-    if lang == "zh":
-  # 仅使用可自由商业使用或开源字体
-zh_candidates = [
-    "Noto Serif SC",
-    "Source Han Sans SC",
-    "WenQuanYi Micro Hei",
-]
-        for candidate in zh_candidates:
-            if candidate in available:
-                plt.rcParams.update({
-                    "font.family":        "sans-serif",
-                    "font.sans-serif":    [candidate, "DejaVu Sans"],
-                    "axes.unicode_minus": False,
-                    "font.size":          _BASE_FONTSIZE,
-                })
-                return candidate
-        # 尝试下载 Noto Sans CJK
-        try:
-            import urllib.request, os
-            font_url  = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
-            font_path = "/tmp/NotoSansCJKsc-Regular.otf"
-            if not os.path.exists(font_path):
-                urllib.request.urlretrieve(font_url, font_path)
-            fm.fontManager.addfont(font_path)
+ if lang == "zh":
+    # 仅使用可自由商业使用或开源字体
+    zh_candidates = [
+        "Noto Serif SC",
+        "Source Han Serif SC",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+    ]
+
+    for candidate in zh_candidates:
+        if candidate in available:
             plt.rcParams.update({
-                "font.family":        "sans-serif",
-                "font.sans-serif":    ["Noto Sans CJK SC", "DejaVu Sans"],
+                "font.family": "sans-serif",
+                "font.sans-serif": [candidate, "DejaVu Sans"],
                 "axes.unicode_minus": False,
-                "font.size":          _BASE_FONTSIZE,
+                "font.size": _BASE_FONTSIZE,
             })
-            return "Noto Sans CJK SC"
-        except Exception:
-            plt.rcParams.update({
-                "axes.unicode_minus": False,
-                "font.size":          _BASE_FONTSIZE,
-            })
-            return "default"
-    else:
-        _fs = {
-            "font.size":       _BASE_FONTSIZE - 1,
-            "axes.titlesize":  _BASE_FONTSIZE,
-            "axes.labelsize":  _BASE_FONTSIZE,
-            "xtick.labelsize": _BASE_FONTSIZE - 1,
-            "ytick.labelsize": _BASE_FONTSIZE - 1,
-            "legend.fontsize": _BASE_FONTSIZE - 1,
-        }
-        for candidate in ["Arial", "Liberation Sans", "FreeSans", "DejaVu Sans"]:
-            if candidate in available:
-                plt.rcParams.update({
-                    "font.family":        "sans-serif",
-                    "font.sans-serif":    [candidate],
-                    "axes.unicode_minus": False,
-                    **_fs,
-                })
-                return candidate
-        plt.rcParams.update({"axes.unicode_minus": False, **_fs})
+            return candidate
+
+    # 尝试自动下载 Noto Serif SC（推荐）
+    try:
+        import urllib.request
+        import os
+
+        font_url = (
+            "https://github.com/notofonts/noto-cjk/raw/main/"
+            "Serif/OTF/SimplifiedChinese/"
+            "NotoSerifCJKsc-Regular.otf"
+        )
+
+        font_path = "/tmp/NotoSerifCJKsc-Regular.otf"
+
+        if not os.path.exists(font_path):
+            urllib.request.urlretrieve(font_url, font_path)
+
+        fm.fontManager.addfont(font_path)
+
+        plt.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Noto Serif SC", "DejaVu Sans"],
+            "axes.unicode_minus": False,
+            "font.size": _BASE_FONTSIZE,
+        })
+
+        return "Noto Serif SC"
+
+    except Exception:
+        plt.rcParams.update({
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans"],
+            "axes.unicode_minus": False,
+            "font.size": _BASE_FONTSIZE,
+        })
+
         return "default"
 
+else:
+    _fs = {
+        "font.size": _BASE_FONTSIZE - 1,
+        "axes.titlesize": _BASE_FONTSIZE,
+        "axes.labelsize": _BASE_FONTSIZE,
+        "xtick.labelsize": _BASE_FONTSIZE - 1,
+        "ytick.labelsize": _BASE_FONTSIZE - 1,
+        "legend.fontsize": _BASE_FONTSIZE - 1,
+    }
+
+    for candidate in ["Arial", "Liberation Sans", "FreeSans", "DejaVu Sans"]:
+        if candidate in available:
+            plt.rcParams.update({
+                "font.family": "sans-serif",
+                "font.sans-serif": [candidate],
+                "axes.unicode_minus": False,
+                **_fs,
+            })
+            return candidate
+
+    plt.rcParams.update({
+        "axes.unicode_minus": False,
+        **_fs,
+    })
+
+    return "default"
 # ============================================================
 # 工具函数
 # ============================================================
