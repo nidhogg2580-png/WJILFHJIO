@@ -106,11 +106,12 @@ def _setup_font(lang="en"):
     _BASE_FONTSIZE = 14
 
     if lang == "zh":
-        zh_candidates = [
-            "SimHei", "Microsoft YaHei", "WenQuanYi Micro Hei",
-            "Noto Sans CJK SC", "AR PL UMing CN", "Source Han Sans SC",
-            "PingFang SC", "STSong", "STHeiti",
-        ]
+  # 仅使用可自由商业使用或开源字体
+zh_candidates = [
+    "Noto Serif SC",
+    "Source Han Sans SC",
+    "WenQuanYi Micro Hei",
+]
         for candidate in zh_candidates:
             if candidate in available:
                 plt.rcParams.update({
