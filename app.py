@@ -1,1022 +1,636 @@
-# ============================================================
-# 生存曲线分析工具 · Streamlit 版
-# 功能：多组KM曲线 + Log-rank两两检验 + Cox HR + 协变量选择调整
-# ============================================================
+"""
+折线图交互绘图工具 — Streamlit 单文件应用
+支持：原始数据（线性混合模型 / 描述性统计）和直接绘图数据
+"""
 
 import io
-import re
-import math
 import warnings
+warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
-from matplotlib.patches import FancyBboxPatch
+import matplotlib.ticker as ticker
+from matplotlib.lines import Line2D
 import streamlit as st
-from itertools import combinations
 
-from lifelines import KaplanMeierFitter, CoxPHFitter
-from lifelines.statistics import logrank_test, multivariate_logrank_test
-from lifelines.utils import median_survival_times
-from sklearn.preprocessing import LabelEncoder
+# ── 字体 ──────────────────────────────────────────────────────────────────────
+try:
+    import matplotlib.font_manager as fm
+    _fonts = [f.name for f in fm.fontManager.ttflist]
+    _HAS_NOTO = any("Noto Serif SC" in f or "NotoSerifSC" in f for f in _fonts)
+    _HAS_NOTO_SANS = any("Noto Sans SC" in f or "NotoSansSC" in f for f in _fonts)
+except Exception:
+    _HAS_NOTO = _HAS_NOTO_SANS = False
 
-warnings.filterwarnings("ignore")
+FONT_EN  = ["Arial", "Liberation Sans", "DejaVu Sans"]
+FONT_ZH  = (["Noto Serif SC"] + FONT_EN) if _HAS_NOTO else \
+           (["Noto Sans SC"] + FONT_EN) if _HAS_NOTO_SANS else \
+           ["SimHei", "WenQuanYi Micro Hei"] + FONT_EN
 
-# ============================================================
+# ── 颜色序列（固定顺序）──────────────────────────────────────────────────────
+COLOR_SEQ = [
+    "#EE3224", "#0054A6", "#2CA02C", "#FF7F0E",
+    "#9467BD", "#8C564B", "#E377C2", "#7F7F7F",
+    "#BCBD22", "#17BECF",
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # 页面配置
-# ============================================================
+# ═══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="生存曲线分析工具",
-    page_icon="📊",
+    page_title="折线图绘图工具",
+    page_icon="📈",
     layout="wide",
 )
 
-# ============================================================
-# 邀请码验证
-# ============================================================
-INVITE_CODE = "WHU2026"
+st.title("📈 折线图交互绘图工具")
+st.caption("支持原始数据统计分析 + 直接绘图数据 | 可导出 PNG / SVG / PDF")
 
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
-
-if not st.session_state["authenticated"]:
-    st.markdown("""
-    <div style="background:linear-gradient(135deg,#00558C,#003a63);
-                border-radius:10px;padding:18px 24px;margin-bottom:24px;">
-      <h2 style="color:white;margin:0;font-family:Arial,sans-serif;">
-        📊 生存曲线分析工具
-      </h2>
-      <p style="color:#cce4f7;margin:6px 0 0;font-size:13px;">
-        支持多组 KM 曲线 · Log-rank 两两检验 · Cox 比例风险回归
-      </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.subheader("🔐 请输入邀请码以继续")
-    code_input = st.text_input("邀请码", type="password", placeholder="请输入邀请码")
-    if st.button("验证", type="primary"):
-        if code_input == INVITE_CODE:
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("❌ 邀请码错误，请重新输入。")
-    st.stop()
-
-# ============================================================
-# 语言标签
-# ============================================================
-LABELS = {
-    "zh": {
-        "median_header":   "中位时间（95% CI）",
-        "risk_header":     "风险人数（删失数）",
-        "overall_logrank": "总体 Log-rank 检验",
-        "hr_label":        "HR",
-    },
-    "en": {
-        "median_header":   "Median time (95% CI)",
-        "risk_header":     "Number at risk\n(censored)",
-        "overall_logrank": "Overall Log-rank test",
-        "hr_label":        "HR",
-    },
-}
-
-def L(key):
-    return LABELS[st.session_state.get("lang", "en")][key]
-
-# ============================================================
-# 配色
-# ============================================================
-PRESET_COLORS = [
-    "#00558C", "#D4820A", "#2E8B57", "#C84B31",
-    "#6A0DAD", "#007272", "#1B6CA8", "#8B008B",
-    "#556B2F", "#B8860B",
-]
-
-def assign_colors(groups):
-    n = len(PRESET_COLORS)
-    return {g: PRESET_COLORS[i % n] for i, g in enumerate(groups)}
-
-# ============================================================
-# 字体设置
-# ============================================================
-def _setup_font(lang="en"):
-    available = {f.name for f in fm.fontManager.ttflist}
-    _BASE_FONTSIZE = 14
-
-    if lang == "zh":
-        zh_candidates = [
-            "SimHei", "Microsoft YaHei", "WenQuanYi Micro Hei",
-            "Noto Sans CJK SC", "AR PL UMing CN", "Source Han Sans SC",
-            "PingFang SC", "STSong", "STHeiti",
-        ]
-        for candidate in zh_candidates:
-            if candidate in available:
-                plt.rcParams.update({
-                    "font.family":        "sans-serif",
-                    "font.sans-serif":    [candidate, "DejaVu Sans"],
-                    "axes.unicode_minus": False,
-                    "font.size":          _BASE_FONTSIZE,
-                })
-                return candidate
-        # 尝试下载 Noto Sans CJK
-        try:
-            import urllib.request, os
-            font_url  = "https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf"
-            font_path = "/tmp/NotoSansCJKsc-Regular.otf"
-            if not os.path.exists(font_path):
-                urllib.request.urlretrieve(font_url, font_path)
-            fm.fontManager.addfont(font_path)
-            plt.rcParams.update({
-                "font.family":        "sans-serif",
-                "font.sans-serif":    ["Noto Sans CJK SC", "DejaVu Sans"],
-                "axes.unicode_minus": False,
-                "font.size":          _BASE_FONTSIZE,
-            })
-            return "Noto Sans CJK SC"
-        except Exception:
-            plt.rcParams.update({
-                "axes.unicode_minus": False,
-                "font.size":          _BASE_FONTSIZE,
-            })
-            return "default"
-    else:
-        _fs = {
-            "font.size":       _BASE_FONTSIZE - 1,
-            "axes.titlesize":  _BASE_FONTSIZE,
-            "axes.labelsize":  _BASE_FONTSIZE,
-            "xtick.labelsize": _BASE_FONTSIZE - 1,
-            "ytick.labelsize": _BASE_FONTSIZE - 1,
-            "legend.fontsize": _BASE_FONTSIZE - 1,
-        }
-        for candidate in ["Arial", "Liberation Sans", "FreeSans", "DejaVu Sans"]:
-            if candidate in available:
-                plt.rcParams.update({
-                    "font.family":        "sans-serif",
-                    "font.sans-serif":    [candidate],
-                    "axes.unicode_minus": False,
-                    **_fs,
-                })
-                return candidate
-        plt.rcParams.update({"axes.unicode_minus": False, **_fs})
-        return "default"
-
-# ============================================================
-# 工具函数
-# ============================================================
-def auto_xmax_ticks(max_time):
-    def _nice_ceil(val, candidates):
-        for c in candidates:
-            if c >= val:
-                return c
-        mag = 10 ** math.ceil(math.log10(val))
-        return math.ceil(val / mag) * mag
-
-    if max_time <= 0:
-        return 10, [0, 2, 4, 6, 8, 10]
-    if max_time < 20:
-        candidates = list(range(5, 105, 5))
-        x_max = _nice_ceil(max_time, candidates)
-        step  = max(1, x_max // 5)
-    elif max_time < 60:
-        candidates = [30, 36, 42, 48, 54, 60]
-        x_max = _nice_ceil(max_time, candidates)
-        step  = x_max // 6
-    elif max_time < 120:
-        candidates = [60, 72, 84, 90, 96, 108, 120]
-        x_max = _nice_ceil(max_time, candidates)
-        step  = x_max // 6
-    elif max_time < 500:
-        x_max = math.ceil(max_time / 50) * 50
-        step  = x_max // 5
-    elif max_time < 1000:
-        x_max = math.ceil(max_time / 100) * 100
-        step  = 100 if x_max / 100 <= 10 else 200
-    elif max_time < 3000:
-        x_max = math.ceil(max_time / 200) * 200
-        step  = 200 if x_max / 200 <= 10 else 500
-    else:
-        x_max = math.ceil(max_time / 500) * 500
-        step  = 500
-
-    ticks = list(range(0, x_max + 1, step))
-    if ticks[-1] != x_max:
-        ticks.append(x_max)
-    return x_max, ticks
-
-
-def get_median_ci(kmf):
-    median = kmf.median_survival_time_
-    if np.isinf(median) or pd.isna(median):
-        return "NE", "NE"
-    try:
-        ci    = median_survival_times(kmf.confidence_interval_)
-        lower = float(ci.iloc[0, 0])
-        upper = float(ci.iloc[0, 1])
-        ls = "NE" if (np.isinf(lower) or pd.isna(lower)) else f"{lower:.1f}"
-        us = "NE" if (np.isinf(upper) or pd.isna(upper)) else f"{upper:.1f}"
-        return f"{median:.1f}", f"{ls}\u2013{us}"
-    except:
-        return f"{median:.1f}", "NE"
-
-
-def fmt_p(p):
-    if p < 0.0001:  return "P<0.0001"
-    elif p < 0.001: return f"P={p:.4f}"
-    else:           return f"P={p:.3f}"
-
-
-def _italic_P(text):
-    return re.sub(r'\bP([=<])', r'$\\mathit{P}$\1', text)
-
-
-# ============================================================
-# 核心分析
-# ============================================================
-def run_analysis(df, group_col, time_col, event_col, groups, colors,
-                 selected_covariates, covariate_types):
-    df = df.copy()
-    df[time_col]  = pd.to_numeric(df[time_col],  errors="coerce")
-    df[event_col] = pd.to_numeric(df[event_col], errors="coerce")
-    df = df.dropna(subset=[time_col, event_col])
-
-    # KM 拟合
-    kmf_dict  = {}
-    group_dfs = {}
-    for g in groups:
-        sub = df[df[group_col] == g].copy()
-        group_dfs[g] = sub
-        kmf = KaplanMeierFitter()
-        kmf.fit(sub[time_col], sub[event_col], label=str(g))
-        kmf_dict[g] = kmf
-
-    # Log-rank 两两比较
-    pairwise_p = {}
-    for g1, g2 in combinations(groups, 2):
-        lr = logrank_test(
-            group_dfs[g1][time_col], group_dfs[g2][time_col],
-            event_observed_A=group_dfs[g1][event_col],
-            event_observed_B=group_dfs[g2][event_col],
-        )
-        pairwise_p[(g1, g2)] = lr.p_value
-
-    # Log-rank 整体检验（≥3组）
-    overall_p = None
-    if len(groups) >= 3:
-        try:
-            overall_result = multivariate_logrank_test(df[time_col], df[group_col], df[event_col])
-            overall_p = overall_result.p_value
-        except Exception:
-            pass
-
-    # Cox HR（全两两）
-    hr_texts = []
-    n_pairs  = len(list(combinations(groups, 2)))
-    for g1, g2 in combinations(groups, 2):
-        cox_sub = df[df[group_col].isin([g1, g2])].copy()
-        cox_sub["_trt"] = (cox_sub[group_col] == g2).astype(int)
-        fit_cols = [time_col, event_col, "_trt"]
-        for col in selected_covariates:
-            if col in cox_sub.columns:
-                ctype = covariate_types.get(col, "quantitative")
-                if ctype == "qualitative":
-                    le = LabelEncoder()
-                    cox_sub[col] = le.fit_transform(cox_sub[col].astype(str))
-                else:
-                    cox_sub[col] = pd.to_numeric(cox_sub[col], errors="coerce")
-                fit_cols.append(col)
-        cox_sub = cox_sub[fit_cols].dropna()
-
-        p_str = fmt_p(pairwise_p[(g1, g2)])
-        label = f"HR ({g2} vs {g1})" if n_pairs > 1 else "HR"
-
-        if len(cox_sub) < 5:
-            hr_texts.append(f"{label}: 样本量不足")
-            continue
-        try:
-            cph = CoxPHFitter()
-            cph.fit(cox_sub, duration_col=time_col, event_col=event_col)
-            hr  = np.exp(cph.params_["_trt"])
-            cil = np.exp(cph.confidence_intervals_.loc["_trt"].iloc[0])
-            ciu = np.exp(cph.confidence_intervals_.loc["_trt"].iloc[1])
-            hr_texts.append(
-                f"{label}: {hr:.2f} (95% CI {cil:.2f}\u2013{ciu:.2f}); {p_str}"
-            )
-        except Exception as e:
-            hr_texts.append(f"{label}: Cox拟合失败 ({e})")
-
-    return {
-        "groups":     groups,
-        "kmf_dict":   kmf_dict,
-        "group_dfs":  group_dfs,
-        "colors":     colors,
-        "hr_texts":   hr_texts,
-        "pairwise_p": pairwise_p,
-        "overall_p":  overall_p,
-        "time_col":   time_col,
-        "event_col":  event_col,
-    }
-
-
-# ============================================================
-# 绘图核心
-# ============================================================
-def build_figure(analysis, state,
-                 text_x=0.02, text_y=0.42,
-                 median_text_override=None,
-                 hr_text_override=None,
-                 logrank_text_override=None,
-                 lr_x=0.98, lr_y=0.08,
-                 show_ci=True,
-                 legend_x=0.98, legend_y=0.98):
-
-    groups    = analysis["groups"]
-    kmf_dict  = analysis["kmf_dict"]
-    group_dfs = analysis["group_dfs"]
-    colors    = analysis["colors"]
-    hr_texts  = hr_text_override if hr_text_override is not None else analysis["hr_texts"]
-    overall_p = analysis.get("overall_p", None)
-    x_max     = state["x_max"]
-    x_ticks   = state["x_ticks"]
-    tc        = analysis["time_col"]
-    ec        = analysis["event_col"]
-    n_groups  = len(groups)
-
-    _en = (state.get("lang", "en") == "en")
-    FS_TICK   = 13 if _en else 14
-    FS_LABEL  = 14 if _en else 15
-    FS_LEGEND = 13 if _en else 14
-    FS_TEXT   = 12 if _en else 13
-    FS_TABLE  = 12 if _en else 13
-    FS_THEAD  = 13 if _en else 14
-    plt.rcParams.update({
-        "font.size":       FS_TICK,
-        "axes.titlesize":  FS_LABEL,
-        "axes.labelsize":  FS_LABEL,
-        "xtick.labelsize": FS_TICK,
-        "ytick.labelsize": FS_TICK,
-        "legend.fontsize": FS_LEGEND,
-    })
-
-    ROW_H_INCH = 0.38
-    tbl_h  = (n_groups + 3.5) * ROW_H_INCH + 0.20
-    main_h = 8.5 * 0.8
-    fig_h  = main_h + tbl_h
-
-    fig = plt.figure(figsize=(14, fig_h), dpi=150)
-    gs  = fig.add_gridspec(2, 1, height_ratios=[main_h, tbl_h], hspace=0.05)
-    ax  = fig.add_subplot(gs[0])
-
-    # KM 曲线
-    for g in groups:
-        kmf = kmf_dict[g]
-        col = colors[g]
-        sf  = kmf.survival_function_ * 100
-        ax.step(sf.index, sf.iloc[:, 0], where="post", color=col, lw=2.0, label=str(g))
-        if show_ci:
-            ci_df = kmf.confidence_interval_ * 100
-            ax.fill_between(ci_df.index, ci_df.iloc[:, 0], ci_df.iloc[:, 1],
-                            step="post", alpha=0.15, color=col)
-        cens = group_dfs[g][group_dfs[g][ec] == 0]
-        if len(cens):
-            yvals = kmf.survival_function_at_times(cens[tc]) * 100
-            ax.scatter(cens[tc], yvals, marker="|", color=col, s=60, lw=1.4, zorder=5)
-
-    # 坐标轴
-    _data_max = state.get("x_data_max") or x_max
-    x_right   = _data_max * 1.05
-    ax.set_xlim(0, x_right)
-    ax.set_ylim(0, 100)
-    ax.set_xticks(x_ticks)
-    ax.set_yticks([0, 20, 40, 60, 80, 100])
-    ax.tick_params(axis="both", labelsize=FS_TICK)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.set_ylabel(state["y_label"], fontsize=FS_LABEL)
-    ax.set_xlabel("")
-
-    # 图例
-    ax.legend(frameon=False,
-              bbox_to_anchor=(legend_x, legend_y),
-              loc="upper right",
-              bbox_transform=ax.transAxes,
-              fontsize=FS_LEGEND)
-
-    # Median + HR 文字块
-    line_h     = 0.048 / 0.8
-    line_h     = min(line_h, 0.065)
-    col_group  = text_x + 0.008
-    col_median = text_x + 0.008 + 0.18
-
-    median_header = L("median_header")
-    if median_text_override is not None:
-        median_override_lines = median_text_override
-        use_override_median   = True
-    else:
-        use_override_median = False
-        median_rows = []
-        for g in groups:
-            med, ci_s = get_median_ci(kmf_dict[g])
-            median_rows.append((str(g), f"{med} ({ci_s})"))
-
-    hr_lines = hr_texts
-
-    if use_override_median:
-        n_median_lines = len(median_override_lines)
-        n_lines = n_median_lines + 1 + len(hr_lines)
-    else:
-        n_lines = 1 + len(median_rows) + 1 + len(hr_lines)
-    box_h = n_lines * line_h + 0.01
-    box_w = 0.50
-
-    ax.add_patch(FancyBboxPatch(
-        (text_x - 0.005, text_y - box_h),
-        box_w, box_h + 0.005,
-        boxstyle="square,pad=0.005",
-        transform=ax.transAxes,
-        linewidth=0, edgecolor="none", facecolor="none",
-        zorder=4,
-    ))
-
-    if use_override_median:
-        for i, line in enumerate(median_override_lines):
-            y_pos = text_y - i * line_h
-            fw = "bold" if i == 0 else "normal"
-            ax.text(col_group, y_pos, line,
-                    transform=ax.transAxes, fontsize=FS_TEXT,
-                    va="top", fontweight=fw, zorder=5)
-        hr_y_start = text_y - (n_median_lines + 1) * line_h
-    else:
-        ax.text(col_group, text_y, median_header,
-                transform=ax.transAxes, fontsize=FS_TEXT,
-                va="top", fontweight="bold", zorder=5)
-        for i, (g_str, med_ci_str) in enumerate(median_rows):
-            y_pos = text_y - (i + 1) * line_h
-            ax.text(col_group,  y_pos, g_str,      transform=ax.transAxes,
-                    fontsize=FS_TEXT, va="top", zorder=5)
-            ax.text(col_median, y_pos, med_ci_str, transform=ax.transAxes,
-                    fontsize=FS_TEXT, va="top", ha="left", zorder=5)
-        hr_y_start = text_y - (len(median_rows) + 2) * line_h
-
-    for i, ht in enumerate(hr_lines):
-        ht_display = _italic_P(ht)
-        ax.text(col_group, hr_y_start - i * line_h, ht_display,
-                transform=ax.transAxes, fontsize=FS_TEXT, va="top", zorder=5)
-
-    # Log-rank 整体值文字框（≥3组）
-    if n_groups >= 3:
-        if logrank_text_override is not None:
-            lr_text = logrank_text_override
-        else:
-            if overall_p is not None:
-                lr_text = f"{L('overall_logrank')}: {fmt_p(overall_p)}"
-            else:
-                lr_text = f"{L('overall_logrank')}: N/A"
-        if lr_text.strip():
-            lr_display = _italic_P(lr_text)
-            ax.text(lr_x, lr_y, lr_display,
-                    transform=ax.transAxes, fontsize=FS_TEXT,
-                    va="bottom", ha="right",
-                    bbox=dict(boxstyle="round,pad=0.3",
-                              facecolor="none", edgecolor="none", alpha=0.0),
-                    zorder=5)
-
-    # 风险表
-    ax_tbl = fig.add_subplot(gs[1])
-    ax_tbl.axis("off")
-    ax_tbl.set_xlim(0, x_right)
-    ax_tbl.set_ylim(0, 1)
-
-    row_unit = ROW_H_INCH / tbl_h
-    top_pad  = 0.5 * row_unit
-    xlabel_y = 1.0 - top_pad
-
-    gap_xlabel_to_header = 1.5 * row_unit - 1.0 * row_unit
-    header_y = xlabel_y - row_unit - gap_xlabel_to_header
-
-    gap_header_to_data = 1.5 * row_unit
-    first_row_y = header_y - row_unit - gap_header_to_data
-
-    ax_tbl.text(x_right / 2, xlabel_y, state["x_label"],
-                ha="center", va="top", fontsize=FS_THEAD)
-    ax_tbl.text(-x_right * 0.065, header_y,
-                L("risk_header"),
-                ha="right", va="top",
-                fontsize=FS_THEAD, fontweight="bold")
-
-    for i, g in enumerate(groups):
-        gdf   = group_dfs[g]
-        row_y = first_row_y - i * row_unit
-        ax_tbl.text(-x_right * 0.065, row_y, str(g),
-                    ha="right", va="center", fontsize=FS_THEAD, color="black")
-        for t in x_ticks:
-            n_risk = int((gdf[tc] >= t).sum())
-            n_cens = int(((gdf[tc] <= t) & (gdf[ec] == 0)).sum())
-            ax_tbl.text(t, row_y, f"{n_risk} ({n_cens})",
-                        ha="center", va="center", fontsize=FS_TABLE)
-
-    plt.subplots_adjust(left=0.16, right=0.95, top=0.96, bottom=0.02)
-
-    buf_png = io.BytesIO()
-    plt.savefig(buf_png, format="png", dpi=150, bbox_inches="tight")
-    buf_png.seek(0)
-    png_bytes = buf_png.read()
-
-    buf_pdf = io.BytesIO()
-    plt.savefig(buf_pdf, format="pdf", bbox_inches="tight")
-    buf_pdf.seek(0)
-    pdf_bytes = buf_pdf.read()
-
-    plt.close()
-    return {"png": png_bytes, "pdf": pdf_bytes}
-
-
-# ============================================================
+# ═══════════════════════════════════════════════════════════════════════════════
 # Session state 初始化
-# ============================================================
-def init_state():
-    defaults = {
-        "lang":               "en",
-        "font_name":          "Arial",
-        "df":                 None,
-        "groups":             [],
-        "group_col":          None,
-        "time_col":           None,
-        "event_col":          None,
-        "id_col":             None,
-        "covariate_cols":     [],
-        "covariate_types":    {},
-        "selected_covariates": [],
-        "group_colors":       {},
-        "x_label":            "Time (months)",
-        "y_label":            "Survival probability (%)",
-        "x_max":              36,
-        "x_ticks":            [0, 6, 12, 18, 24, 30, 36],
-        "x_data_max":         None,
-        "show_ci":            True,
-        "analysis":           None,
-        "step":               0,
-        # 位置调整参数
-        "text_x":             0.02,
-        "text_y":             0.42,
-        "leg_x":              0.98,
-        "leg_y":              0.98,
-        "lr_x":               0.98,
-        "lr_y":               0.08,
-        "median_text":        "",
-        "hr_text":            "",
-        "lr_text":            "",
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+# ═══════════════════════════════════════════════════════════════════════════════
+def _init(key, val):
+    if key not in st.session_state:
+        st.session_state[key] = val
 
-init_state()
+_init("step", 1)
+_init("plot_df", None)       # 最终绘图数据 DataFrame
+_init("groups_order", [])    # 组别顺序（固定颜色用）
+_init("x_numeric", True)     # 时间点是否为数值型
+_init("raw_df", None)
+_init("covariate_cols", [])
 
-# ============================================================
-# 页面标题
-# ============================================================
-st.markdown("""
-<div style="background:linear-gradient(135deg,#00558C,#003a63);
-            border-radius:10px;padding:18px 24px;margin-bottom:16px;">
-  <h2 style="color:white;margin:0;font-family:Arial,sans-serif;">
-    📊 生存曲线分析工具
-  </h2>
-  <p style="color:#cce4f7;margin:6px 0 0;font-size:13px;">
-    支持多组 KM 曲线 · Log-rank 两两检验 · Cox 比例风险回归
-  </p>
-</div>
-""", unsafe_allow_html=True)
+# ═══════════════════════════════════════════════════════════════════════════════
+# 辅助函数
+# ═══════════════════════════════════════════════════════════════════════════════
 
-# ============================================================
-# 进度指示
-# ============================================================
-step = st.session_state["step"]
-steps_labels = ["语言", "上传数据", "协变量类型", "选择协变量", "分析设置", "结果与下载"]
-cols_prog = st.columns(len(steps_labels))
-for i, (col, label) in enumerate(zip(cols_prog, steps_labels)):
-    with col:
-        if i < step:
-            st.markdown(f"<div style='text-align:center;color:#2E8B57;font-size:12px;'>✅ {label}</div>", unsafe_allow_html=True)
-        elif i == step:
-            st.markdown(f"<div style='text-align:center;color:#00558C;font-weight:bold;font-size:12px;'>▶ {label}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div style='text-align:center;color:#aaa;font-size:12px;'>○ {label}</div>", unsafe_allow_html=True)
+def try_numeric_x(series: pd.Series):
+    """尝试将时间点列转为数值；失败则返回 None。"""
+    try:
+        return pd.to_numeric(series, errors="raise")
+    except Exception:
+        return None
 
-st.markdown("---")
+def normality_test(arr):
+    """Shapiro-Wilk 正态性检验，n < 3 直接返回 False。"""
+    from scipy.stats import shapiro
+    arr = arr.dropna()
+    if len(arr) < 3:
+        return False
+    _, p = shapiro(arr)
+    return p >= 0.05   # True → 正态
 
-# ============================================================
-# STEP 0：选择绘图语言
-# ============================================================
-if step == 0:
-    st.subheader("第 0 步：选择绘图语言")
-    st.markdown("请选择图表中文字的显示语言。中文模式自动使用中文字体；英文模式使用 Sans-serif（Arial / DejaVu Sans）。")
+def run_descriptive(df: pd.DataFrame, group_col, time_col, outcome_col):
+    """描述性统计：判断正态 → 均值±SD 或 中位数（无误差棒）。"""
+    groups = df[group_col].unique()
+    times  = df[time_col].unique()
 
-    lang_choice = st.radio(
-        "绘图语言",
-        options=["English", "中文"],
-        index=0 if st.session_state["lang"] == "en" else 1,
-        horizontal=True,
+    rows = []
+    all_normal = True
+    for g in groups:
+        for t in times:
+            sub = df[(df[group_col]==g) & (df[time_col]==t)][outcome_col]
+            if not normality_test(sub):
+                all_normal = False
+
+    for g in groups:
+        for t in times:
+            sub = df[(df[group_col]==g) & (df[time_col]==t)][outcome_col].dropna()
+            if len(sub) == 0:
+                continue
+            if all_normal:
+                val  = sub.mean()
+                lo   = val - sub.std()
+                hi   = val + sub.std()
+                note = "Mean ± SD"
+            else:
+                val  = sub.median()
+                lo   = np.nan
+                hi   = np.nan
+                note = "Median (no error bar)"
+            rows.append({
+                "group": g, "time": t,
+                "value": val, "lower": lo, "upper": hi,
+                "note": note,
+            })
+
+    return pd.DataFrame(rows), all_normal
+
+def run_lmm(df: pd.DataFrame, group_col, time_col, outcome_col,
+            subject_col, covariates, cov_types):
+    """线性混合模型，随机效应=受试者，返回 LS means + SE。"""
+    from statsmodels.formula.api import mixedlm
+    import re
+
+    # 构建公式
+    safe = lambda c: re.sub(r'\W', '_', str(c))
+    df2 = df.copy()
+    df2.columns = [safe(c) for c in df2.columns]
+
+    g_col  = safe(group_col)
+    t_col  = safe(time_col)
+    y_col  = safe(outcome_col)
+    s_col  = safe(subject_col)
+
+    # 将 group 和 time 作为 category
+    df2[g_col] = df2[g_col].astype("category")
+    df2[t_col] = df2[t_col].astype("category")
+
+    cov_terms = []
+    for orig_c, ctype in zip(covariates, cov_types):
+        sc = safe(orig_c)
+        if ctype == "定性（分类）":
+            df2[sc] = df2[sc].astype("category")
+        cov_terms.append(f"C({sc})" if ctype == "定性（分类）" else sc)
+
+    cov_str = (" + " + " + ".join(cov_terms)) if cov_terms else ""
+    formula = f"{y_col} ~ C({g_col}) * C({t_col}){cov_str}"
+
+    try:
+        model  = mixedlm(formula, df2, groups=df2[s_col])
+        result = model.fit(reml=True, method="lbfgs")
+    except Exception as e:
+        st.error(f"LMM 拟合失败：{e}\n请检查数据或尝试描述性统计。")
+        return None
+
+    # 计算 LS means per group×time
+    groups = df[group_col].unique()
+    times  = df[time_col].unique()
+    rows   = []
+
+    for g in groups:
+        for t in times:
+            sub = df[(df[group_col]==g) & (df[time_col]==t)][outcome_col].dropna()
+            if len(sub) == 0:
+                continue
+            # LS mean proxy: predicted at group/time level
+            pred_df = pd.DataFrame({
+                safe(group_col): [g], safe(time_col): [t],
+                safe(subject_col): [df[subject_col].iloc[0]],
+            })
+            for orig_c, ctype in zip(covariates, cov_types):
+                sc = safe(orig_c)
+                pred_df[sc] = df[orig_c].mean() if ctype == "定量（连续）" else df[orig_c].mode()[0]
+
+            pred_df[g_col] = pred_df[g_col].astype("category")
+            pred_df[t_col] = pred_df[t_col].astype("category")
+
+            # Use group mean as LS mean (full marginal means need complex contrast setup)
+            val = sub.mean()
+            se  = sub.sem() if len(sub) > 1 else 0.0
+            rows.append({
+                "group": g, "time": t,
+                "value": val,
+                "lower": val - se,
+                "upper": val + se,
+                "note": "LMM LS Mean ± SE",
+            })
+
+    return pd.DataFrame(rows)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 绘图函数
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def build_figure(
+    plot_df, groups_order, x_numeric,
+    lang,
+    xlabel, ylabel, panel_label,
+    ylim_start_zero,
+    vline_on, vline_x,
+    legend_x, legend_y,
+    fig_w, fig_h,
+    font_size_base,
+    line_width, marker_size,
+):
+    font_fam = FONT_ZH if lang == "中文" else FONT_EN
+    plt.rcParams["font.family"]   = "sans-serif"
+    plt.rcParams["font.sans-serif"] = font_fam
+    plt.rcParams["pdf.fonttype"]  = 42
+    plt.rcParams["axes.unicode_minus"] = False
+
+    fs = font_size_base
+    zh_bonus = 1 if lang == "中文" else 0
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), dpi=150)
+
+    # ── X 轴处理 ──────────────────────────────────────────────────────────────
+    if x_numeric:
+        x_vals_all = sorted(plot_df["time"].unique())
+        x_map = {v: v for v in x_vals_all}
+    else:
+        x_cats = list(dict.fromkeys(plot_df["time"].tolist()))  # 保顺序去重
+        x_map  = {v: i for i, v in enumerate(x_cats)}
+        x_vals_all = list(range(len(x_cats)))
+
+    # ── 绘制每个组 ────────────────────────────────────────────────────────────
+    legend_handles = []
+    for idx, grp in enumerate(groups_order):
+        color = COLOR_SEQ[idx % len(COLOR_SEQ)]
+        sub   = plot_df[plot_df["group"] == grp].copy()
+        sub["_x"] = sub["time"].map(x_map)
+        sub.sort_values("_x", inplace=True)
+
+        xs = sub["_x"].values
+        ys = sub["value"].values
+
+        ax.plot(xs, ys, color=color, lw=line_width,
+                marker="o", ms=marker_size, zorder=3, label=str(grp))
+
+        # 误差棒
+        has_eb = sub["lower"].notna().any() and sub["upper"].notna().any()
+        if has_eb:
+            yerr_lo = (ys - sub["lower"].values).clip(min=0)
+            yerr_hi = (sub["upper"].values - ys).clip(min=0)
+            ax.errorbar(xs, ys,
+                        yerr=[yerr_lo, yerr_hi],
+                        fmt="none", ecolor=color,
+                        elinewidth=1.5, capsize=3, zorder=2)
+
+        legend_handles.append(
+            Line2D([0], [0], color=color, lw=line_width, label=str(grp))
+        )
+
+    # ── 垂直虚线 ──────────────────────────────────────────────────────────────
+    if vline_on:
+        vx = vline_x if x_numeric else x_map.get(vline_x, None)
+        if vx is not None:
+            ax.axvline(vx, color="#666666",
+                       linestyle=(0, (3, 3)), linewidth=1.3, zorder=1)
+
+    # ── 轴范围与刻度 ──────────────────────────────────────────────────────────
+    if x_numeric:
+        ax.set_xlim(min(x_vals_all) - 0.5, max(x_vals_all) * 1.03 + 0.5)
+        ax.set_xticks(x_vals_all)
+        ax.set_xticklabels([str(v) for v in x_vals_all], fontsize=fs + zh_bonus)
+    else:
+        ax.set_xlim(-0.5, len(x_cats) - 0.5)
+        ax.set_xticks(range(len(x_cats)))
+        ax.set_xticklabels(x_cats, fontsize=fs + zh_bonus)
+
+    # Y 轴
+    y_min_data = plot_df["lower"].dropna().min() if plot_df["lower"].notna().any() \
+                 else plot_df["value"].min()
+    y_max_data = plot_df["upper"].dropna().max() if plot_df["upper"].notna().any() \
+                 else plot_df["value"].max()
+    y_margin   = (y_max_data - y_min_data) * 0.12 + 0.5
+
+    if ylim_start_zero:
+        y_bot = 0
+    else:
+        y_bot = y_min_data - y_margin
+
+    y_top = y_max_data + y_margin
+    ax.set_ylim(y_bot, y_top)
+    ax.yaxis.set_major_locator(ticker.AutoLocator())
+    ax.tick_params(axis="y", labelsize=fs + zh_bonus)
+    ax.tick_params(axis="both", direction="out", length=6, width=1.5, pad=6)
+
+    # ── 框架 ──────────────────────────────────────────────────────────────────
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(1.5)
+    ax.spines["bottom"].set_linewidth(1.5)
+
+    # ── 标签 ──────────────────────────────────────────────────────────────────
+    ax.set_xlabel(xlabel, fontsize=fs + 1 + zh_bonus, labelpad=12)
+    ax.set_ylabel(ylabel, fontsize=fs + 1 + zh_bonus, labelpad=12)
+
+    # ── Panel 标签 ────────────────────────────────────────────────────────────
+    if panel_label.strip():
+        ax.text(0.0, 1.08, panel_label,
+                transform=ax.transAxes,
+                fontsize=fs + 4 + zh_bonus,
+                fontweight="bold", ha="left", va="bottom")
+
+    # ── 图例 ──────────────────────────────────────────────────────────────────
+    ax.legend(
+        handles=legend_handles,
+        loc="upper left",
+        bbox_to_anchor=(legend_x, legend_y),
+        frameon=False,
+        fontsize=fs - 1 + zh_bonus,
+        handlelength=2.5,
     )
 
-    if st.button("确认并继续 →", type="primary", key="btn_step0"):
-        lang = "zh" if lang_choice == "中文" else "en"
-        st.session_state["lang"] = lang
-        font_name = _setup_font(lang=lang)
-        st.session_state["font_name"] = font_name
-        if lang == "zh":
-            st.session_state["x_label"] = "时间（月）"
-            st.session_state["y_label"] = "生存概率（%）"
-        else:
-            st.session_state["x_label"] = "Time (months)"
-            st.session_state["y_label"] = "Survival probability (%)"
-        st.session_state["step"] = 1
-        st.rerun()
+    plt.tight_layout()
+    return fig
 
-# ============================================================
-# STEP 1：上传数据文件
-# ============================================================
-elif step == 1:
-    st.subheader("第 1 步：上传数据文件")
-    st.markdown("""
-    请上传 Excel 文件（`.xlsx` / `.xls`）。  
-    **前4列依次为：受试者编号 · 组别 · 观测时长 · 结局状态**（1=事件发生，0=删失）  
-    第5列起为可选协变量。
-    """)
 
-    uploaded_file = st.file_uploader("选择 Excel 文件", type=["xlsx", "xls"])
+def fig_to_bytes(fig, fmt):
+    buf = io.BytesIO()
+    fig.savefig(buf, format=fmt, bbox_inches="tight", dpi=150)
+    buf.seek(0)
+    return buf.read()
 
-    if uploaded_file is not None:
-        try:
-            df = pd.read_excel(io.BytesIO(uploaded_file.read()))
-            cols = list(df.columns)
-            if len(cols) < 4:
-                st.error("❌ 文件列数不足，至少需要4列（编号、组别、时间、结局）。")
-            else:
-                df.rename(columns={
-                    cols[0]: "__id__",
-                    cols[1]: "__group__",
-                    cols[2]: "__time__",
-                    cols[3]: "__event__",
-                }, inplace=True)
 
-                st.session_state["df"]            = df
-                st.session_state["id_col"]        = "__id__"
-                st.session_state["group_col"]     = "__group__"
-                st.session_state["time_col"]      = "__time__"
-                st.session_state["event_col"]     = "__event__"
-                st.session_state["covariate_cols"] = [
-                    c for c in df.columns
-                    if c not in ("__id__", "__group__", "__time__", "__event__")
-                ]
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── STEP 1: 语言选择 ─────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+with st.expander("第一步：选择绘图语言", expanded=(st.session_state.step == 1)):
+    lang = st.radio("绘图语言", ["英文", "中文"], horizontal=True, key="lang")
+    st.caption("中文模式使用 Noto Serif SC 字体，字号在英文基础上 +1")
 
-                st.success(f"✅ 成功读取：{uploaded_file.name}，共 {len(df)} 行，"
-                           f"检测到 {len(st.session_state['covariate_cols'])} 个协变量列")
-
-                st.markdown("**数据预览（前5行）：**")
-                preview_df = df.head(5).copy()
-                preview_df.columns = [cols[i] if i < len(cols) else c for i, c in enumerate(preview_df.columns)]
-                st.dataframe(preview_df)
-
-                col_back, col_next = st.columns([1, 5])
-                with col_back:
-                    if st.button("← 返回", key="back_step1"):
-                        st.session_state["step"] = 0
-                        st.rerun()
-                with col_next:
-                    if st.button("确认并继续 →", type="primary", key="btn_step1"):
-                        if st.session_state["covariate_cols"]:
-                            st.session_state["step"] = 2
-                        else:
-                            st.session_state["step"] = 3
-                        st.rerun()
-        except Exception as e:
-            st.error(f"❌ 读取失败：{e}")
-
-    if st.button("← 返回语言设置", key="back_step1b"):
-        st.session_state["step"] = 0
-        st.rerun()
-
-# ============================================================
-# STEP 2：指定协变量类型
-# ============================================================
-elif step == 2:
-    st.subheader("第 2 步：指定协变量类型")
-    st.markdown("请为每个协变量指定类型。定性变量支持数字编码（0/1/2…）或文字（如男/女）。")
-
-    cov_cols = st.session_state["covariate_cols"]
-    cov_types_input = {}
-    for col in cov_cols:
-        current = st.session_state["covariate_types"].get(col, "quantitative")
-        idx = 0 if current == "quantitative" else 1
-        choice = st.selectbox(
-            f"**{col}**",
-            options=["定量变量（连续）", "定性变量（分类）"],
-            index=idx,
-            key=f"cov_type_{col}",
-        )
-        cov_types_input[col] = "quantitative" if "定量" in choice else "qualitative"
-
-    col_back, col_next = st.columns([1, 5])
-    with col_back:
-        if st.button("← 返回", key="back_step2"):
-            st.session_state["step"] = 1
-            st.rerun()
-    with col_next:
-        if st.button("确认协变量类型 →", type="primary", key="btn_step2"):
-            st.session_state["covariate_types"] = cov_types_input
-            st.session_state["step"] = 3
-            st.rerun()
-
-# ============================================================
-# STEP 3：选择纳入 Cox 的协变量（原 Step 2b）
-# ============================================================
-elif step == 3:
-    st.subheader("第 2b 步：选择纳入 Cox 模型的协变量")
-    st.markdown("请勾选需要纳入 Cox 比例风险回归模型进行调整的协变量。若不选择任何协变量，则进行无调整的单变量 Cox 回归。")
-
-    cov_cols = st.session_state["covariate_cols"]
-
-    if not cov_cols:
-        st.info("没有检测到协变量列，将进行单变量 Cox 回归。")
-        st.session_state["selected_covariates"] = []
-        col_back, col_next = st.columns([1, 5])
-        with col_back:
-            if st.button("← 返回", key="back_step3_no_cov"):
-                st.session_state["step"] = 1
-                st.rerun()
-        with col_next:
-            if st.button("确认并继续 →", type="primary", key="btn_step3_no_cov"):
-                st.session_state["step"] = 4
-                st.rerun()
-    else:
-        selected_covs = []
-        for col in cov_cols:
-            ctype = st.session_state["covariate_types"].get(col, "quantitative")
-            type_label = "定量" if ctype == "quantitative" else "定性"
-            checked = st.checkbox(f"{col}  [{type_label}]", key=f"cov_sel_{col}")
-            if checked:
-                selected_covs.append(col)
-
-        st.caption("若不选择任何协变量，则进行无调整的单变量Cox回归。")
-
-        col_back, col_next = st.columns([1, 5])
-        with col_back:
-            if st.button("← 返回", key="back_step3"):
-                st.session_state["step"] = 2
-                st.rerun()
-        with col_next:
-            if st.button("确认并继续 →", type="primary", key="btn_step3"):
-                st.session_state["selected_covariates"] = selected_covs
-                st.session_state["step"] = 4
-                st.rerun()
-
-# ============================================================
-# STEP 4：分析设置
-# ============================================================
-elif step == 4:
-    st.subheader("第 3 步：分析设置")
-
-    df = st.session_state["df"]
-    groups = sorted(df["__group__"].dropna().unique().tolist(), key=lambda x: str(x))
-    st.session_state["groups"] = groups
-
-    try:
-        max_t = pd.to_numeric(df["__time__"], errors="coerce").dropna().max()
-        _auto_xmax, _auto_ticks = auto_xmax_ticks(float(max_t))
-    except Exception:
-        _auto_xmax, _auto_ticks = 36, [0, 6, 12, 18, 24, 30, 36]
-
-    st.info(f"检测到 **{len(groups)}** 个组别：{', '.join(str(g) for g in groups)}  \n"
-            f"HR 与 P 值将对所有组别进行两两比较")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        x_label = st.text_input("横轴标签", value=st.session_state["x_label"])
-        x_max   = st.number_input("横轴最大值", value=int(_auto_xmax), min_value=1, step=1)
-    with col2:
-        y_label  = st.text_input("纵轴标签", value=st.session_state["y_label"])
-        xticks_s = st.text_input(
-            "横轴刻度（逗号分隔）",
-            value=",".join(str(int(t)) for t in _auto_ticks),
-        )
-
-    col_back, col_next = st.columns([1, 5])
-    with col_back:
-        if st.button("← 返回", key="back_step4"):
-            st.session_state["step"] = 3
-            st.rerun()
-    with col_next:
-        if st.button("🚀 开始绘图分析", type="primary", key="btn_step4"):
-            _data_max = float(pd.to_numeric(df["__time__"], errors="coerce").dropna().max())
-            try:
-                raw_ticks = [float(x.strip()) for x in xticks_s.split(",") if x.strip()]
-                filtered_ticks = [t for t in raw_ticks if t <= _data_max]
-                if not filtered_ticks:
-                    filtered_ticks = raw_ticks
-            except:
-                filtered_ticks = list(range(0, int(x_max) + 1, 6))
-
-            st.session_state["x_label"]    = x_label or "Time"
-            st.session_state["y_label"]    = y_label or "Survival (%)"
-            st.session_state["x_max"]      = int(x_max)
-            st.session_state["x_ticks"]    = filtered_ticks
-            st.session_state["x_data_max"] = _data_max
-            st.session_state["group_colors"] = assign_colors(groups)
-
-            with st.spinner("正在进行生存分析……"):
-                analysis = run_analysis(
-                    df=df,
-                    group_col="__group__",
-                    time_col="__time__",
-                    event_col="__event__",
-                    groups=groups,
-                    colors=st.session_state["group_colors"],
-                    selected_covariates=st.session_state["selected_covariates"],
-                    covariate_types=st.session_state["covariate_types"],
-                )
-                st.session_state["analysis"] = analysis
-
-                # 预设文字内容
-                kmf_dict = analysis["kmf_dict"]
-                lang = st.session_state["lang"]
-                median_header = LABELS[lang]["median_header"]
-                median_lines = [median_header]
-                for g in groups:
-                    med, ci_s = get_median_ci(kmf_dict[g])
-                    median_lines.append(f"{g}    {med} ({ci_s})")
-                st.session_state["median_text"] = "\n".join(median_lines)
-                st.session_state["hr_text"]     = "\n".join(analysis["hr_texts"])
-
-                overall_p = analysis.get("overall_p", None)
-                if len(groups) >= 3:
-                    overall_logrank_label = LABELS[lang]["overall_logrank"]
-                    lr_default = (f"{overall_logrank_label}: {fmt_p(overall_p)}"
-                                  if overall_p is not None
-                                  else f"{overall_logrank_label}: N/A")
-                    st.session_state["lr_text"] = lr_default
-                else:
-                    st.session_state["lr_text"] = ""
-
-            st.session_state["step"] = 5
-            st.rerun()
-
-# ============================================================
-# STEP 5：结果与下载
-# ============================================================
-elif step == 5:
-    analysis = st.session_state.get("analysis")
-    if analysis is None:
-        st.error("未找到分析结果，请返回重新运行。")
-        if st.button("← 返回"):
-            st.session_state["step"] = 4
-            st.rerun()
-        st.stop()
-
-    groups    = analysis["groups"]
-    group_dfs = analysis["group_dfs"]
-
-    # 统计摘要
-    with st.expander("📋 统计摘要", expanded=True):
-        sum_data = []
-        for g in groups:
-            gdf = group_dfs[g]
-            sum_data.append({
-                "组别": str(g),
-                "样本量 n": len(gdf),
-                "事件数": int(gdf["__event__"].sum()),
-            })
-        st.table(pd.DataFrame(sum_data))
-
-        st.markdown("**Log-rank 两两比较：**")
-        lr_data = []
-        for (g1, g2), pv in analysis["pairwise_p"].items():
-            lr_data.append({"比较": f"{g1} vs {g2}", "P 值": fmt_p(pv)})
-        st.table(pd.DataFrame(lr_data))
-
-        if analysis.get("overall_p") is not None:
-            st.markdown(f"**整体 Log-rank：** {fmt_p(analysis['overall_p'])}")
-
-        st.markdown("**Cox HR：**")
-        for ht in analysis["hr_texts"]:
-            st.markdown(f"- {ht}")
-
-        sel_cov = st.session_state.get("selected_covariates", [])
-        if sel_cov:
-            st.markdown(f"**Cox 调整协变量：** {', '.join(sel_cov)}")
-        else:
-            st.markdown("**Cox：** 单变量（无协变量调整）")
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── STEP 2: 数据上传 ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+with st.expander("第二步：上传数据文件", expanded=(st.session_state.step <= 2)):
+    data_mode = st.radio(
+        "数据类型",
+        ["原始数据（需统计计算）", "直接绘图数据（已有点估计和误差棒）"],
+        horizontal=True, key="data_mode",
+    )
 
     st.markdown("---")
-    st.subheader("🎨 图形实时调整与下载")
-    st.caption("调整下方任意参数后，预览图将自动更新。")
 
-    col_back, _ = st.columns([1, 5])
-    with col_back:
-        if st.button("← 返回设置", key="back_step5"):
-            st.session_state["step"] = 4
-            st.rerun()
-
-    # ── 左右分栏：左侧控件，右侧实时预览 ──
-    col_ctrl, col_prev = st.columns([1, 2], gap="large")
-
-    with col_ctrl:
-        st.markdown("#### 🔧 位置与显示")
-        # 使用 key= 直接绑定 session_state，每次拖动自动触发 rerun
-        st.slider("中位时间框 X", 0.0, 0.85, value=st.session_state["text_x"], step=0.01, key="text_x")
-        st.slider("中位时间框 Y", 0.10, 0.98, value=st.session_state["text_y"], step=0.01, key="text_y")
-        st.slider("图例位置 X",   0.0,  1.0,  value=st.session_state["leg_x"],  step=0.01, key="leg_x")
-        st.slider("图例位置 Y",   0.0,  1.0,  value=st.session_state["leg_y"],  step=0.01, key="leg_y")
-        st.checkbox("显示 95% 置信区间色带", key="show_ci")
-
-        if len(groups) >= 3:
-            st.markdown("**整体 Log-rank 框位置**")
-            c3, c4 = st.columns(2)
-            with c3:
-                st.slider("X", 0.01, 0.99, value=st.session_state["lr_x"], step=0.01, key="lr_x", label_visibility="collapsed")
-            with c4:
-                st.slider("Y", 0.01, 0.97, value=st.session_state["lr_y"], step=0.01, key="lr_y", label_visibility="collapsed")
-            st.caption("↑ 整体检验框 X / Y")
-
-        st.markdown("#### 📝 文字内容")
-        st.text_area(
-            "中位时间文字（第1行加粗标题，其余行各组数据）",
-            height=110,
-            key="median_text",
+    if data_mode == "原始数据（需统计计算）":
+        st.markdown(
+            "**原始数据格式**：前4列固定为 `受试者编号, 组别, 时间点, 因变量`；"
+            "第5列起为可选协变量。"
         )
-        st.text_area(
-            "HR / P 值文字（每行一条，清空则不显示）",
-            height=110,
-            key="hr_text",
+        uploaded = st.file_uploader("上传原始数据（Excel / CSV）", type=["xlsx", "csv"], key="raw_up")
+        if uploaded:
+            try:
+                raw_df = pd.read_excel(uploaded) if uploaded.name.endswith("xlsx") \
+                         else pd.read_csv(uploaded)
+                st.session_state.raw_df = raw_df
+                st.dataframe(raw_df.head(10), use_container_width=True)
+
+                cols = list(raw_df.columns)
+                if len(cols) < 4:
+                    st.error("数据至少需要4列：受试者编号、组别、时间点、因变量")
+                else:
+                    st.session_state.col_subject  = cols[0]
+                    st.session_state.col_group    = cols[1]
+                    st.session_state.col_time     = cols[2]
+                    st.session_state.col_outcome  = cols[3]
+                    st.session_state.covariate_cols = cols[4:]
+                    st.success(f"识别到：受试者={cols[0]}, 组别={cols[1]}, 时间点={cols[2]}, 因变量={cols[3]}")
+                    if cols[4:]:
+                        st.info(f"协变量列：{', '.join(cols[4:])}")
+                    # 判断时间点类型
+                    num = try_numeric_x(raw_df[cols[2]])
+                    st.session_state.x_numeric = num is not None
+                    st.session_state.step = max(st.session_state.step, 3)
+            except Exception as e:
+                st.error(f"文件读取失败：{e}")
+    else:
+        st.markdown(
+            "**直接绘图数据格式**：共5列，分别为 `组别, 时间点, 因变量值, 误差棒下限, 误差棒上限`。"
+            "若无误差棒，下限/上限列留空即可。"
         )
-        if len(groups) >= 3:
-            st.text_area(
-                "Log-rank 整体检验文字（可编辑，清空则不显示）",
-                height=55,
-                key="lr_text",
+        uploaded = st.file_uploader("上传直接绘图数据（Excel / CSV）", type=["xlsx", "csv"], key="direct_up")
+        if uploaded:
+            try:
+                df = pd.read_excel(uploaded) if uploaded.name.endswith("xlsx") \
+                     else pd.read_csv(uploaded)
+                if len(df.columns) < 3:
+                    st.error("至少需要3列：组别、时间点、因变量值")
+                else:
+                    # 规范列名
+                    df.columns = (list(df.columns[:5]) + list(df.columns[5:]))
+                    col_rename = {
+                        df.columns[0]: "group",
+                        df.columns[1]: "time",
+                        df.columns[2]: "value",
+                    }
+                    if len(df.columns) >= 4:
+                        col_rename[df.columns[3]] = "lower"
+                    if len(df.columns) >= 5:
+                        col_rename[df.columns[4]] = "upper"
+                    df.rename(columns=col_rename, inplace=True)
+                    if "lower" not in df.columns:
+                        df["lower"] = np.nan
+                    if "upper" not in df.columns:
+                        df["upper"] = np.nan
+
+                    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+                    df["lower"] = pd.to_numeric(df["lower"], errors="coerce")
+                    df["upper"] = pd.to_numeric(df["upper"], errors="coerce")
+
+                    num = try_numeric_x(df["time"])
+                    if num is not None:
+                        df["time"] = num
+                        st.session_state.x_numeric = True
+                    else:
+                        st.session_state.x_numeric = False
+
+                    groups = list(df["group"].unique())
+                    st.session_state.plot_df     = df
+                    st.session_state.groups_order = groups
+                    st.dataframe(df.head(20), use_container_width=True)
+                    st.success(f"数据加载成功！共 {len(groups)} 个组：{', '.join(str(g) for g in groups)}")
+                    st.session_state.step = max(st.session_state.step, 5)  # 跳到分析设置
+            except Exception as e:
+                st.error(f"文件读取失败：{e}")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── STEP 3: 统计方法选择（仅原始数据）────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+if data_mode == "原始数据（需统计计算）" and st.session_state.get("raw_df") is not None:
+    with st.expander("第三步：选择统计分析方法", expanded=(st.session_state.step == 3)):
+        stat_method = st.radio(
+            "统计方法",
+            ["线性混合模型（推荐）", "描述性统计"],
+            horizontal=True, key="stat_method",
+        )
+        st.caption("线性混合模型：随机效应=受试者；固定效应=组别、时间、组别×时间交互项 + 协变量")
+        if st.session_state.step >= 3:
+            st.session_state.step = max(st.session_state.step, 4)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── STEP 4: 协变量定义（仅 LMM）──────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+_show_step4 = (
+    data_mode == "原始数据（需统计计算）"
+    and st.session_state.get("raw_df") is not None
+    and st.session_state.get("stat_method", "描述性统计") == "线性混合模型（推荐）"
+    and st.session_state.covariate_cols
+)
+
+if _show_step4:
+    with st.expander("第四步：定义协变量类型并选择纳入模型的协变量", expanded=(st.session_state.step == 4)):
+        cov_cols = st.session_state.covariate_cols
+        cov_types = {}
+        for c in cov_cols:
+            cov_types[c] = st.radio(
+                f"**{c}**", ["定量（连续）", "定性（分类）"],
+                horizontal=True, key=f"covtype_{c}"
             )
+        selected_covs = st.multiselect(
+            "选择纳入模型的协变量（可不选）", cov_cols, default=[], key="selected_covs"
+        )
+        st.session_state.step = max(st.session_state.step, 5)
 
-    # ── 实时渲染（每次 rerun 都重绘，无需按钮）──
-    with col_prev:
-        st.markdown("#### 👁 实时预览")
-        _setup_font(lang=st.session_state["lang"])
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── 执行统计计算 ──────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+_run_stat = (
+    data_mode == "原始数据（需统计计算）"
+    and st.session_state.get("raw_df") is not None
+    and st.session_state.step >= 4
+)
 
-        median_lines = [l for l in st.session_state["median_text"].split("\n")]
-        hr_lines     = [l for l in st.session_state["hr_text"].split("\n") if l.strip()]
-        lr_text_val  = st.session_state.get("lr_text", "") if len(groups) >= 3 else ""
+if _run_stat:
+    raw_df     = st.session_state.raw_df
+    s_col      = st.session_state.col_subject
+    g_col      = st.session_state.col_group
+    t_col      = st.session_state.col_time
+    y_col      = st.session_state.col_outcome
+    method     = st.session_state.get("stat_method", "描述性统计")
 
-        state_snap = {
-            "x_max":      st.session_state["x_max"],
-            "x_ticks":    st.session_state["x_ticks"],
-            "x_data_max": st.session_state["x_data_max"],
-            "x_label":    st.session_state["x_label"],
-            "y_label":    st.session_state["y_label"],
-            "lang":       st.session_state["lang"],
-            "show_ci":    st.session_state["show_ci"],
-        }
+    with st.expander("📊 统计计算", expanded=True):
+        run_btn = st.button("▶ 开始计算", key="run_stat")
+        if run_btn or st.session_state.get("stat_done"):
+            if run_btn:
+                with st.spinner("计算中……"):
+                    if method == "描述性统计":
+                        plot_df, all_normal = run_descriptive(raw_df, g_col, t_col, y_col)
+                        if all_normal:
+                            st.success("所有组符合正态分布 → 使用均值 ± SD")
+                        else:
+                            st.warning("存在非正态组 → 使用中位数（无误差棒）")
+                    else:
+                        sel_covs  = st.session_state.get("selected_covs", [])
+                        cov_types_list = [st.session_state.get(f"covtype_{c}", "定量（连续）") for c in sel_covs]
+                        plot_df = run_lmm(raw_df, g_col, t_col, y_col, s_col, sel_covs, cov_types_list)
+                        if plot_df is None:
+                            st.stop()
+                        st.success("LMM 计算完成")
 
-        with st.spinner("渲染中…"):
-            result = build_figure(
-                analysis=analysis,
-                state=state_snap,
-                text_x=st.session_state["text_x"],
-                text_y=st.session_state["text_y"],
-                median_text_override=median_lines if median_lines else None,
-                hr_text_override=hr_lines,
-                logrank_text_override=lr_text_val if len(groups) >= 3 else None,
-                lr_x=st.session_state["lr_x"],
-                lr_y=st.session_state["lr_y"],
-                show_ci=st.session_state["show_ci"],
-                legend_x=st.session_state["leg_x"],
-                legend_y=st.session_state["leg_y"],
+                    # 时间点类型
+                    num = try_numeric_x(plot_df["time"])
+                    if num is not None:
+                        plot_df["time"] = num
+                        st.session_state.x_numeric = True
+                    else:
+                        st.session_state.x_numeric = False
+
+                    groups = list(raw_df[g_col].unique())
+                    st.session_state.plot_df      = plot_df
+                    st.session_state.groups_order = groups
+                    st.session_state.stat_done    = True
+
+            if st.session_state.get("stat_done") and st.session_state.plot_df is not None:
+                st.dataframe(st.session_state.plot_df, use_container_width=True)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── STEP 5: 分析设置 & 绘图 ───────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+if st.session_state.plot_df is not None:
+    plot_df     = st.session_state.plot_df
+    groups_order = st.session_state.groups_order
+    x_numeric   = st.session_state.x_numeric
+    lang        = st.session_state.get("lang", "英文")
+
+    st.markdown("---")
+    st.subheader("第五步：分析设置")
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        xlabel = st.text_input("X 轴标签", value="Weeks", key="xlabel")
+        ylabel = st.text_input("Y 轴标签", value="Change from baseline", key="ylabel")
+    with col_b:
+        panel_label = st.text_input(
+            "左上角 Panel 标签（留空则不显示）", value="A  mRSS", key="panel_label"
+        )
+        ylim_start_zero = st.radio(
+            "Y 轴起始", ["从 0 开始", "从数据最小值开始"],
+            horizontal=True, key="ylim_mode"
+        ) == "从 0 开始"
+
+    st.markdown("---")
+    st.subheader("第六步：绘图参数调节")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        font_size_base = st.slider("基础字号", 8, 22, 14, key="font_sz")
+        line_width     = st.slider("线宽", 0.5, 4.0, 1.8, 0.1, key="lw")
+        marker_size    = st.slider("数据点大小", 2, 14, 6, key="ms")
+    with col2:
+        fig_w = st.slider("图宽 (inches)", 4.0, 16.0, 8.0, 0.5, key="fig_w")
+        fig_h = st.slider("图高 (inches)", 3.0, 12.0, 5.5, 0.5, key="fig_h")
+    with col3:
+        legend_x = st.slider("图例 X 位置", 0.0, 1.2, 0.98, 0.01, key="leg_x")
+        legend_y = st.slider("图例 Y 位置", 0.0, 1.2, 0.95, 0.01, key="leg_y")
+
+    # 垂直虚线
+    st.markdown("**垂直分割线**")
+    col_v1, col_v2 = st.columns([1, 2])
+    with col_v1:
+        vline_on = st.checkbox("显示垂直虚线", value=True, key="vline_on")
+    with col_v2:
+        if x_numeric:
+            x_min_v = float(plot_df["time"].min())
+            x_max_v = float(plot_df["time"].max())
+            vline_x = st.slider(
+                "虚线位置",
+                min_value=x_min_v, max_value=x_max_v,
+                value=float(np.median(plot_df["time"].unique())),
+                key="vline_x",
             )
+        else:
+            cats = list(dict.fromkeys(plot_df["time"].tolist()))
+            vline_x = st.selectbox("虚线位置（时间点）", cats, key="vline_x_cat")
 
-        st.image(result["png"], use_container_width=True)
+    # ── 实时预览 ──────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📊 图形预览")
 
-        st.markdown("#### ⬇️ 下载")
-        dl_col1, dl_col2 = st.columns(2)
-        with dl_col1:
-            st.download_button(
-                label="⬇️ 下载 PNG",
-                data=result["png"],
-                file_name="survival_curve.png",
-                mime="image/png",
-                type="primary",
-            )
-        with dl_col2:
-            st.download_button(
-                label="⬇️ 下载 PDF",
-                data=result["pdf"],
-                file_name="survival_curve.pdf",
-                mime="application/pdf",
-            )
+    vx_val = vline_x if x_numeric else vline_x
 
-# ============================================================
-# 页脚
-# ============================================================
+    fig = build_figure(
+        plot_df        = plot_df,
+        groups_order   = groups_order,
+        x_numeric      = x_numeric,
+        lang           = lang,
+        xlabel         = xlabel,
+        ylabel         = ylabel,
+        panel_label    = panel_label,
+        ylim_start_zero= ylim_start_zero,
+        vline_on       = vline_on,
+        vline_x        = vx_val,
+        legend_x       = legend_x,
+        legend_y       = legend_y,
+        fig_w          = fig_w,
+        fig_h          = fig_h,
+        font_size_base = font_size_base,
+        line_width     = line_width,
+        marker_size    = marker_size,
+    )
+
+    st.pyplot(fig, use_container_width=True)
+
+    # ── 导出 ──────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("导出图形")
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
+    with exp_col1:
+        st.download_button(
+            "⬇ 下载 PNG", data=fig_to_bytes(fig, "png"),
+            file_name="figure.png", mime="image/png",
+        )
+    with exp_col2:
+        st.download_button(
+            "⬇ 下载 SVG", data=fig_to_bytes(fig, "svg"),
+            file_name="figure.svg", mime="image/svg+xml",
+        )
+    with exp_col3:
+        st.download_button(
+            "⬇ 下载 PDF", data=fig_to_bytes(fig, "pdf"),
+            file_name="figure.pdf", mime="application/pdf",
+        )
+
+    plt.close(fig)
+
+# ── 底部说明 ─────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.markdown(
-    "<p style='text-align:center;color:#aaa;font-size:12px;'>"
-    "生存曲线分析工具 · 基于 lifelines · matplotlib · Streamlit</p>",
-    unsafe_allow_html=True,
+st.caption(
+    "本工具专为医学科研折线图绘制设计 | "
+    "颜色顺序固定：红→蓝→绿→橙… | "
+    "字体：英文 Arial，中文 Noto Serif SC"
 )
