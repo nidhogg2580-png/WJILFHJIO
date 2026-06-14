@@ -526,9 +526,20 @@ st.markdown("""
 # ============================================================
 step = st.session_state["step"]
 
-STEP_LABELS_RAW    = ["语言", "数据类型", "上传数据", "统计方法", "协变量", "分析设置", "结果与下载"]
+# 将 step 统一映射为数值，用于进度条着色
+# "run_stat" 和 3.5 均视为第4步（协变量/计算中）
+def _step_to_num(s):
+    if s in ("run_stat", "cov_setup"):
+        return 4
+    try:
+        return int(float(s))
+    except Exception:
+        return 0
+
+_step_num = _step_to_num(step)
+
+STEP_LABELS_RAW    = ["语言", "数据类型", "上传数据", "统计方法", "协变量/计算", "分析设置", "结果与下载"]
 STEP_LABELS_DIRECT = ["语言", "数据类型", "上传数据", "分析设置", "结果与下载"]
-STEP_LABELS_NONE   = ["语言", "数据类型", "上传数据", "统计方法", "协变量", "分析设置", "结果与下载"]
 
 # 根据数据模式决定标签
 if st.session_state["data_mode"] == "direct":
@@ -539,9 +550,9 @@ else:
 cols_prog = st.columns(len(_labels))
 for i, (col, label) in enumerate(zip(cols_prog, _labels)):
     with col:
-        if i < step:
+        if i < _step_num:
             st.markdown(f"<div style='text-align:center;color:#2E8B57;font-size:12px;'>✅ {label}</div>", unsafe_allow_html=True)
-        elif i == step:
+        elif i == _step_num:
             st.markdown(f"<div style='text-align:center;color:#00558C;font-weight:bold;font-size:12px;'>▶ {label}</div>", unsafe_allow_html=True)
         else:
             st.markdown(f"<div style='text-align:center;color:#aaa;font-size:12px;'>○ {label}</div>", unsafe_allow_html=True)
@@ -785,7 +796,7 @@ elif step == 3:
         if st.button("确认并继续 →", type="primary", key="btn_s3"):
             cov_cols = st.session_state["covariate_cols"]
             if "线性混合" in method_choice and cov_cols:
-                st.session_state["step"] = 3.5   # 用字符串标记子步骤
+                st.session_state["step"] = "cov_setup"
                 st.rerun()
             else:
                 # 描述性统计 或 LMM但无协变量 → 直接执行
@@ -794,9 +805,9 @@ elif step == 3:
                 st.rerun()
 
 # ============================================================
-# STEP 3.5（仅 LMM + 有协变量）：协变量设置
+# STEP cov_setup（仅 LMM + 有协变量）：协变量设置
 # ============================================================
-elif step == 3.5:
+elif step == "cov_setup":
     st.subheader("第 3b 步：协变量设置")
     st.markdown("请为每个协变量指定类型，并勾选需要纳入线性混合模型进行调整的协变量。")
 
@@ -824,11 +835,11 @@ elif step == 3.5:
 
     col_back, col_next = st.columns([1, 5])
     with col_back:
-        if st.button("← 返回", key="back_s35"):
+        if st.button("← 返回", key="back_cov"):
             st.session_state["step"] = 3
             st.rerun()
     with col_next:
-        if st.button("确认并开始计算 →", type="primary", key="btn_s35"):
+        if st.button("确认并开始计算 →", type="primary", key="btn_cov"):
             st.session_state["selected_covs"] = selected_covs
             st.session_state["step"] = "run_stat"
             st.rerun()
