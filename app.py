@@ -321,38 +321,60 @@ def build_figure(
     ylim_start_zero,
     vline_on, vline_x,
     legend_x, legend_y,
-    fig_width,          # 横轴宽度缩放
+    fig_width,          # 横轴宽度缩放（inches）
 ):
-    _en = (lang == "en")
-    FS_TICK   = 13 if _en else 14
-    FS_LABEL  = 14 if _en else 15
-    FS_LEGEND = 13 if _en else 14
-    FS_PANEL  = 18 if _en else 19
+    """
+    关键设计原则：
+    1. 图形物理尺寸大（12×7 in）+ 低 DPI(100) = 与生存曲线工具等比，
+       使字号/线宽在屏幕和 PDF 中视觉一致。
+    2. 图例始终用 ax.transAxes 定位，且保存时用固定 subplots_adjust
+       而非 tight_layout + bbox_inches="tight"，
+       这样移动图例不会改变 axes 的物理比例。
+    """
+    _zh = (lang == "zh")
+
+    # ── 与生存曲线工具对齐的字号体系 ─────────────────────────
+    # 生存曲线图：figsize(12,7) DPI=100，字号 10~12pt 视觉上很纤细
+    # 这里同样采用 figsize≈(12,7) DPI=100，字号完全对齐
+    FS_TICK   = 11 if not _zh else 12
+    FS_LABEL  = 12 if not _zh else 13
+    FS_LEGEND = 11 if not _zh else 12
+    FS_PANEL  = 14 if not _zh else 15
+
+    # 固定高度，宽度由用户滑块控制（单位 inches，DPI=100）
+    # fig_width 滑块范围对应 8~18 in，默认 12 in
+    FIG_H = 7.0
+    DPI   = 100
 
     plt.rcParams.update({
-        "font.size":       FS_TICK,
-        "axes.titlesize":  FS_LABEL,
-        "axes.labelsize":  FS_LABEL,
-        "xtick.labelsize": FS_TICK,
-        "ytick.labelsize": FS_TICK,
-        "legend.fontsize": FS_LEGEND,
-        "pdf.fonttype":    42,
+        "font.size":          FS_TICK,
+        "axes.titlesize":     FS_LABEL,
+        "axes.labelsize":     FS_LABEL,
+        "xtick.labelsize":    FS_TICK,
+        "ytick.labelsize":    FS_TICK,
+        "legend.fontsize":    FS_LEGEND,
+        "pdf.fonttype":       42,
         "axes.unicode_minus": False,
+        "lines.linewidth":    1.8,
     })
 
-    fig_h = 5.5
-    fig   = plt.figure(figsize=(fig_width, fig_h), dpi=150)
-    ax    = fig.add_subplot(111)
+    fig = plt.figure(figsize=(fig_width, FIG_H), dpi=DPI)
+
+    # ── 固定 axes 区域，预留上方 panel 标签和四周空白 ────────
+    # 用 add_axes([left, bottom, width, height]) 以 figure 比例锁死位置
+    # 这样图例无论移到哪里，axes 的物理大小都不变
+    L, B = 0.10, 0.12   # 左、下留白（figure 比例）
+    R, T = 0.92, 0.88   # 右、上边界
+    ax = fig.add_axes([L, B, R - L, T - B])
 
     # ── X 轴映射 ──────────────────────────────────────────────
     if x_numeric:
         x_vals_sorted = sorted(plot_df["time"].unique())
-        x_map  = {v: float(v) for v in x_vals_sorted}
+        x_map      = {v: float(v) for v in x_vals_sorted}
         x_plot_min = float(min(x_vals_sorted))
         x_plot_max = float(max(x_vals_sorted))
     else:
-        # 定性：按 x_cats 固定顺序等间距
-        x_map  = {v: i for i, v in enumerate(x_cats)}
+        x_map      = {v: i for i, v in enumerate(x_cats)}
         x_plot_min = 0
         x_plot_max = len(x_cats) - 1
 
@@ -367,46 +389,41 @@ def build_figure(
         xs = sub["_x"].values
         ys = sub["value"].values
 
-        # 线 + 点（与生存曲线线宽 2.0 一致）
-        ax.plot(xs, ys, color=color, lw=2.0,
-                marker="o", ms=6, zorder=3, label=str(grp))
+        ax.plot(xs, ys, color=color, lw=1.8,
+                marker="o", ms=5, zorder=3)
 
-        # 误差棒
         has_eb = sub["lower"].notna().any() and sub["upper"].notna().any()
         if has_eb:
             yerr_lo = np.clip(ys - sub["lower"].values, 0, None)
             yerr_hi = np.clip(sub["upper"].values - ys, 0, None)
             ax.errorbar(xs, ys, yerr=[yerr_lo, yerr_hi],
                         fmt="none", ecolor=color,
-                        elinewidth=1.5, capsize=3, zorder=2)
+                        elinewidth=1.2, capsize=3, zorder=2)
 
         legend_handles.append(
-            Line2D([0], [0], color=color, lw=2.0, label=str(grp))
+            Line2D([0], [0], color=color, lw=1.8, label=str(grp))
         )
 
     # ── 垂直虚线 ──────────────────────────────────────────────
     if vline_on:
         vx = vline_x if x_numeric else x_map.get(vline_x, None)
         if vx is not None:
-            ax.axvline(float(vx), color="#666666",
-                       linestyle=(0, (3, 3)), linewidth=1.3, zorder=1)
+            ax.axvline(float(vx), color="#888888",
+                       linestyle=(0, (4, 4)), linewidth=1.0, zorder=1)
 
     # ── X 轴范围与刻度 ────────────────────────────────────────
     if x_numeric:
-        # 定量：按真实数值，0 在原点，两端留少量 padding
         x_range = x_plot_max - x_plot_min if x_plot_max != x_plot_min else 1.0
-        pad_r   = x_range * 0.03
-        ax.set_xlim(x_plot_min, x_plot_max + pad_r)
+        ax.set_xlim(x_plot_min, x_plot_max + x_range * 0.02)
         ax.set_xticks(x_vals_sorted)
         ax.set_xticklabels([str(v) for v in x_vals_sorted], fontsize=FS_TICK)
     else:
-        # 定性：等间距，第一个刻度距原点右移 0.5
         ax.set_xlim(-0.5, x_plot_max + 0.5)
         ax.set_xticks(range(len(x_cats)))
         ax.set_xticklabels(x_cats, fontsize=FS_TICK)
 
-    # ── Y 轴范围（稀疏刻度，约原来 2/3）────────────────────────
-    y_vals = plot_df["value"].dropna()
+    # ── Y 轴范围与刻度（稀疏，nbins=4）──────────────────────
+    y_vals    = plot_df["value"].dropna()
     y_lo_data = plot_df["lower"].dropna().min() if plot_df["lower"].notna().any() else y_vals.min()
     y_hi_data = plot_df["upper"].dropna().max() if plot_df["upper"].notna().any() else y_vals.max()
     y_range   = max(y_hi_data - y_lo_data, 1e-6)
@@ -415,31 +432,31 @@ def build_figure(
     y_bot = 0 if ylim_start_zero else y_lo_data - y_margin
     y_top = y_hi_data + y_margin
     ax.set_ylim(y_bot, y_top)
-
-    # 稀疏刻度（nbins≈4，约为 AutoLocator 默认 ~6 的 2/3）
-    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, steps=[1,2,5,10]))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, steps=[1, 2, 5, 10]))
     ax.tick_params(axis="y", labelsize=FS_TICK)
 
-    # ── 坐标轴样式（与生存曲线一致）──────────────────────────
+    # ── 坐标轴样式 ────────────────────────────────────────────
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(1.5)
-    ax.spines["bottom"].set_linewidth(1.5)
-    ax.tick_params(axis="both", direction="out", length=6, width=1.5, pad=6)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+    ax.tick_params(axis="both", direction="out", length=5, width=1.2, pad=5)
 
     # ── 轴标签 ────────────────────────────────────────────────
     ax.set_xlabel(xlabel, fontsize=FS_LABEL, labelpad=10)
     ax.set_ylabel(ylabel, fontsize=FS_LABEL, labelpad=10)
 
-    # ── Panel 标签（左上角）──────────────────────────────────
+    # ── Panel 标签（左上角，固定在 axes 上方）────────────────
     if panel_label.strip():
-        ax.text(0.0, 1.06, panel_label,
+        ax.text(0.0, 1.04, panel_label,
                 transform=ax.transAxes,
                 fontsize=FS_PANEL,
                 fontweight="bold",
                 ha="left", va="bottom")
 
-    # ── 图例（使用 ax.transAxes，保证坐标系内定位）──────────
+    # ── 图例 ─────────────────────────────────────────────────
+    # 关键：bbox_transform=ax.transAxes，始终在 axes 坐标系内定位
+    # 保存时不用 bbox_inches="tight"，所以图例超出 axes 也不会压缩图形
     ax.legend(
         handles=legend_handles,
         frameon=False,
@@ -447,18 +464,17 @@ def build_figure(
         loc="upper right",
         bbox_transform=ax.transAxes,
         fontsize=FS_LEGEND,
-        handlelength=2.5,
+        handlelength=2.0,
     )
 
-    plt.tight_layout(pad=1.5)
-
+    # ── 保存：bbox_inches=None 保持 figure 固定尺寸 ──────────
     buf_png = io.BytesIO()
-    fig.savefig(buf_png, format="png", dpi=150, bbox_inches="tight")
+    fig.savefig(buf_png, format="png", dpi=DPI, bbox_inches=None)
     buf_png.seek(0)
     png_bytes = buf_png.read()
 
     buf_pdf = io.BytesIO()
-    fig.savefig(buf_pdf, format="pdf", bbox_inches="tight")
+    fig.savefig(buf_pdf, format="pdf", bbox_inches=None)
     buf_pdf.seek(0)
     pdf_bytes = buf_pdf.read()
 
@@ -498,7 +514,7 @@ def init_state():
         # 预览调节
         "legend_x":         0.98,
         "legend_y":         0.98,
-        "fig_width":        8.0,
+        "fig_width":        12.0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1028,7 +1044,7 @@ elif step == 5:
                   step=0.01, key="legend_y")
 
         st.markdown("**横轴宽度**")
-        st.slider("图形宽度 (inches)", 5.0, 18.0,
+        st.slider("图形宽度 (inches)", 8.0, 20.0,
                   value=st.session_state["fig_width"],
                   step=0.5, key="fig_width")
         st.caption("拖动可避免横轴刻度标签重叠；图例相对位置不变。")
