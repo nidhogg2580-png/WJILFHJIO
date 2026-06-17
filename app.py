@@ -311,6 +311,36 @@ def run_lmm(df, group_col, time_col, outcome_col, subject_col, covariates, cov_t
     return pd.DataFrame(rows), None   # (plot_df, error_msg)
 
 
+def sort_time_categories(cats):
+    """
+    对定性时间点列表进行智能升序排列。
+    规则：Baseline/基线排第一，其余提取数字后按数值升序。
+    例：["Week 48","Week 4","Baseline","Week 12"] →
+        ["Baseline","Week 4","Week 12","Week 48"]
+    """
+    import re as _re
+
+    BASELINE_KEYWORDS = {
+        "baseline", "基线", "base", "screening",
+        "筛选", "run-in", "run_in", "week0", "week 0",
+        "month0", "month 0", "day0", "day 0", "visit0", "visit 0",
+    }
+
+    def _sort_key(s):
+        s_lower = str(s).lower().strip()
+        # 基线类关键词排最前
+        if s_lower in BASELINE_KEYWORDS or s_lower.replace(" ", "") in BASELINE_KEYWORDS:
+            return (0, 0, s)
+        # 提取第一个数字，按数值排序
+        nums = _re.findall(r'\d+(?:\.\d+)?', s_lower)
+        if nums:
+            return (1, float(nums[0]), s)
+        # 无数字：字母序兜底
+        return (2, 0, s)
+
+    return sorted(cats, key=_sort_key)
+
+
 # ============================================================
 # 绘图核心（风格与生存曲线工具一致）
 # ============================================================
@@ -321,7 +351,8 @@ def build_figure(
     ylim_start_zero,
     vline_on, vline_x,
     legend_x, legend_y,
-    fig_width,          # 横轴宽度缩放（inches）
+    fig_width,
+    show_errbar=True,       # Fix-1: 控制是否显示误差棒
 ):
     """
     关键设计原则：
@@ -334,15 +365,11 @@ def build_figure(
     _zh = (lang == "zh")
 
     # ── 与生存曲线工具对齐的字号体系 ─────────────────────────
-    # 生存曲线图：figsize(12,7) DPI=100，字号 10~12pt 视觉上很纤细
-    # 这里同样采用 figsize≈(12,7) DPI=100，字号完全对齐
     FS_TICK   = 11 if not _zh else 12
     FS_LABEL  = 12 if not _zh else 13
     FS_LEGEND = 11 if not _zh else 12
-    FS_PANEL  = 14 if not _zh else 15
+    FS_PANEL  = 16 if not _zh else 17   # 较之前 14/15 增大 2 号
 
-    # 固定高度，宽度由用户滑块控制（单位 inches，DPI=100）
-    # fig_width 滑块范围对应 8~18 in，默认 12 in
     FIG_H = 7.0
     DPI   = 100
 
@@ -360,23 +387,22 @@ def build_figure(
 
     fig = plt.figure(figsize=(fig_width, FIG_H), dpi=DPI)
 
-    # ── 固定 axes 区域，预留上方 panel 标签和四周空白 ────────
-    # 用 add_axes([left, bottom, width, height]) 以 figure 比例锁死位置
-    # 这样图例无论移到哪里，axes 的物理大小都不变
-    L, B = 0.10, 0.12   # 左、下留白（figure 比例）
-    R, T = 0.92, 0.88   # 右、上边界
+    L, B = 0.10, 0.12
+    R, T = 0.92, 0.88
     ax = fig.add_axes([L, B, R - L, T - B])
 
-    # ── X 轴映射 ──────────────────────────────────────────────
+    # ── X 轴映射（Fix-3: 定性变量按智能升序排列）────────────
     if x_numeric:
         x_vals_sorted = sorted(plot_df["time"].unique())
         x_map      = {v: float(v) for v in x_vals_sorted}
         x_plot_min = float(min(x_vals_sorted))
         x_plot_max = float(max(x_vals_sorted))
     else:
-        x_map      = {v: i for i, v in enumerate(x_cats)}
+        # 对 x_cats 进行智能时间升序排列
+        x_cats_sorted = sort_time_categories(x_cats)
+        x_map      = {v: i for i, v in enumerate(x_cats_sorted)}
         x_plot_min = 0
-        x_plot_max = len(x_cats) - 1
+        x_plot_max = len(x_cats_sorted) - 1
 
     # ── 绘制每组曲线 ──────────────────────────────────────────
     legend_handles = []
@@ -392,7 +418,8 @@ def build_figure(
         ax.plot(xs, ys, color=color, lw=1.8,
                 marker="o", ms=5, zorder=3)
 
-        has_eb = sub["lower"].notna().any() and sub["upper"].notna().any()
+        has_eb = (show_errbar and
+                  sub["lower"].notna().any() and sub["upper"].notna().any())
         if has_eb:
             yerr_lo = np.clip(ys - sub["lower"].values, 0, None)
             yerr_hi = np.clip(sub["upper"].values - ys, 0, None)
@@ -419,8 +446,8 @@ def build_figure(
         ax.set_xticklabels([str(v) for v in x_vals_sorted], fontsize=FS_TICK)
     else:
         ax.set_xlim(-0.5, x_plot_max + 0.5)
-        ax.set_xticks(range(len(x_cats)))
-        ax.set_xticklabels(x_cats, fontsize=FS_TICK)
+        ax.set_xticks(range(len(x_cats_sorted)))
+        ax.set_xticklabels(x_cats_sorted, fontsize=FS_TICK)
 
     # ── Y 轴范围与刻度（稀疏，nbins=4）──────────────────────
     y_vals    = plot_df["value"].dropna()
@@ -432,7 +459,7 @@ def build_figure(
     y_bot = 0 if ylim_start_zero else y_lo_data - y_margin
     y_top = y_hi_data + y_margin
     ax.set_ylim(y_bot, y_top)
-    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, steps=[1, 2, 5, 10]))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
     ax.tick_params(axis="y", labelsize=FS_TICK)
 
     # ── 坐标轴样式 ────────────────────────────────────────────
@@ -505,7 +532,7 @@ def init_state():
         "selected_covs":    [],
         "stat_note":        "",
         # 分析设置
-        "xlabel":           "Weeks",
+        "xlabel":           "Timepoint",
         "ylabel":           "Change from baseline",
         "panel_label":      "A  Figure",
         "ylim_start_zero":  False,
@@ -515,6 +542,7 @@ def init_state():
         "legend_x":         0.98,
         "legend_y":         0.98,
         "fig_width":        12.0,
+        "show_errbar":      True,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -594,10 +622,10 @@ if step == 0:
         st.session_state["lang"] = lang
         _setup_font(lang=lang)
         if lang == "zh":
-            st.session_state["xlabel"] = "周"
+            st.session_state["xlabel"] = "时间点"
             st.session_state["ylabel"] = "较基线的变化量"
         else:
-            st.session_state["xlabel"] = "Weeks"
+            st.session_state["xlabel"] = "Timepoint"
             st.session_state["ylabel"] = "Change from baseline"
         st.session_state["step"] = 1
         st.rerun()
@@ -1049,6 +1077,14 @@ elif step == 5:
                   step=0.5, key="fig_width")
         st.caption("拖动可避免横轴刻度标签重叠；图例相对位置不变。")
 
+        st.markdown("**误差棒**")
+        st.checkbox(
+            "显示误差棒",
+            value=st.session_state["show_errbar"],
+            key="show_errbar",
+            help="分组较多时可关闭误差棒，避免相互遮挡影响可视化",
+        )
+
     with col_prev:
         st.markdown("#### 👁 实时预览")
 
@@ -1067,6 +1103,7 @@ elif step == 5:
             legend_x       = st.session_state["legend_x"],
             legend_y       = st.session_state["legend_y"],
             fig_width      = st.session_state["fig_width"],
+            show_errbar    = st.session_state["show_errbar"],
         )
 
         st.image(result["png"], use_container_width=True)
