@@ -368,7 +368,9 @@ def build_figure(
     FS_TICK   = 11 if not _zh else 12
     FS_LABEL  = 12 if not _zh else 13
     FS_LEGEND = 11 if not _zh else 12
-    FS_PANEL  = 16 if not _zh else 17   # 较之前 14/15 增大 2 号
+    # Panel 标签需明显大于轴标签，作为图形左上角的"小标题"
+    # 此前 16/17 在 12×7in 大画布上视觉仍偏小，这里直接采用 20/21
+    FS_PANEL  = 20 if not _zh else 21
 
     FIG_H = 7.0
     DPI   = 100
@@ -459,7 +461,53 @@ def build_figure(
     y_bot = 0 if ylim_start_zero else y_lo_data - y_margin
     y_top = y_hi_data + y_margin
     ax.set_ylim(y_bot, y_top)
-    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+
+    # Y 轴刻度：保证固定数量（约5~6个），同时尽量落在整齐数值上
+    # 策略：在 [y_bot, y_top] 范围内，尝试若干"美观步长"，
+    # 选择能产生 4~7 个刻度中最接近 6 的步长；若都不满足才退化为等分。
+    y_span = y_top - y_bot
+    candidate_steps = []
+    for base in [1, 2, 2.5, 5]:
+        for mag in [0.001, 0.01, 0.1, 1, 10, 100, 1000]:
+            candidate_steps.append(base * mag)
+
+    best_step = None
+    best_count = None
+    for step in sorted(set(candidate_steps)):
+        n = y_span / step
+        if 4 <= n <= 7:
+            if best_step is None or abs(n - 6) < abs(best_count - 6):
+                best_step = step
+                best_count = n
+
+    if best_step is not None:
+        # 用美观步长生成刻度，起点对齐到 step 的整数倍
+        start_tick = np.ceil(y_bot / best_step) * best_step
+        y_ticks = list(np.arange(start_tick, y_top + best_step * 0.5, best_step))
+        # 确保至少有4个刻度，否则补充等分
+        if len(y_ticks) < 4:
+            y_ticks = list(np.linspace(y_bot, y_top, 6))
+    else:
+        # 退化方案：固定6个等分刻度
+        y_ticks = list(np.linspace(y_bot, y_top, 6))
+
+    # 根据 step 决定小数位数
+    if best_step is not None and best_step >= 1:
+        decimals = 0
+    elif best_step is not None and best_step >= 0.1:
+        decimals = 1
+    else:
+        decimals = 2
+
+    y_ticks = sorted(set(round(v, decimals) for v in y_ticks))
+    # 过滤超出范围的刻度（保留视觉边界内的）
+    y_ticks = [v for v in y_ticks if y_bot - 1e-9 <= v <= y_top + 1e-9]
+
+    ax.set_yticks(y_ticks)
+    if decimals == 0:
+        ax.set_yticklabels([f"{int(round(v))}" for v in y_ticks], fontsize=FS_TICK)
+    else:
+        ax.set_yticklabels([f"{v:.{decimals}f}" for v in y_ticks], fontsize=FS_TICK)
     ax.tick_params(axis="y", labelsize=FS_TICK)
 
     # ── 坐标轴样式 ────────────────────────────────────────────
