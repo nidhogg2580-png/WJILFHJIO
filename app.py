@@ -353,6 +353,7 @@ def build_figure(
     legend_x, legend_y,
     fig_width,
     show_errbar=True,       # Fix-1: 控制是否显示误差棒
+    custom_yticks=None,      # 自定义纵轴刻度列表；None 则自动
 ):
     """
     关键设计原则：
@@ -451,7 +452,7 @@ def build_figure(
         ax.set_xticks(range(len(x_cats_sorted)))
         ax.set_xticklabels(x_cats_sorted, fontsize=FS_TICK)
 
-    # ── Y 轴范围与刻度（稀疏，nbins=4）──────────────────────
+    # ── Y 轴范围与刻度（均匀分布，与此前版本一致）────────────
     y_vals    = plot_df["value"].dropna()
     y_lo_data = plot_df["lower"].dropna().min() if plot_df["lower"].notna().any() else y_vals.min()
     y_hi_data = plot_df["upper"].dropna().max() if plot_df["upper"].notna().any() else y_vals.max()
@@ -460,54 +461,22 @@ def build_figure(
 
     y_bot = 0 if ylim_start_zero else y_lo_data - y_margin
     y_top = y_hi_data + y_margin
-    ax.set_ylim(y_bot, y_top)
 
-    # Y 轴刻度：保证固定数量（约5~6个），同时尽量落在整齐数值上
-    # 策略：在 [y_bot, y_top] 范围内，尝试若干"美观步长"，
-    # 选择能产生 4~7 个刻度中最接近 6 的步长；若都不满足才退化为等分。
-    y_span = y_top - y_bot
-    candidate_steps = []
-    for base in [1, 2, 2.5, 5]:
-        for mag in [0.001, 0.01, 0.1, 1, 10, 100, 1000]:
-            candidate_steps.append(base * mag)
-
-    best_step = None
-    best_count = None
-    for step in sorted(set(candidate_steps)):
-        n = y_span / step
-        if 4 <= n <= 7:
-            if best_step is None or abs(n - 6) < abs(best_count - 6):
-                best_step = step
-                best_count = n
-
-    if best_step is not None:
-        # 用美观步长生成刻度，起点对齐到 step 的整数倍
-        start_tick = np.ceil(y_bot / best_step) * best_step
-        y_ticks = list(np.arange(start_tick, y_top + best_step * 0.5, best_step))
-        # 确保至少有4个刻度，否则补充等分
-        if len(y_ticks) < 4:
-            y_ticks = list(np.linspace(y_bot, y_top, 6))
+    if custom_yticks:
+        # 用户自定义刻度：轴范围扩展到覆盖所有自定义刻度（再加一点 margin）
+        y_bot = min(y_bot, min(custom_yticks))
+        y_top = max(y_top, max(custom_yticks))
+        ax.set_ylim(y_bot, y_top)
+        ax.set_yticks(custom_yticks)
+        # 若全部为整数则显示整数，否则保留小数
+        if all(float(v).is_integer() for v in custom_yticks):
+            ax.set_yticklabels([f"{int(v)}" for v in custom_yticks], fontsize=FS_TICK)
+        else:
+            ax.set_yticklabels([f"{v:g}" for v in custom_yticks], fontsize=FS_TICK)
     else:
-        # 退化方案：固定6个等分刻度
-        y_ticks = list(np.linspace(y_bot, y_top, 6))
+        ax.set_ylim(y_bot, y_top)
+        ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=4, steps=[1, 2, 5, 10]))
 
-    # 根据 step 决定小数位数
-    if best_step is not None and best_step >= 1:
-        decimals = 0
-    elif best_step is not None and best_step >= 0.1:
-        decimals = 1
-    else:
-        decimals = 2
-
-    y_ticks = sorted(set(round(v, decimals) for v in y_ticks))
-    # 过滤超出范围的刻度（保留视觉边界内的）
-    y_ticks = [v for v in y_ticks if y_bot - 1e-9 <= v <= y_top + 1e-9]
-
-    ax.set_yticks(y_ticks)
-    if decimals == 0:
-        ax.set_yticklabels([f"{int(round(v))}" for v in y_ticks], fontsize=FS_TICK)
-    else:
-        ax.set_yticklabels([f"{v:.{decimals}f}" for v in y_ticks], fontsize=FS_TICK)
     ax.tick_params(axis="y", labelsize=FS_TICK)
 
     # ── 坐标轴样式 ────────────────────────────────────────────
@@ -586,6 +555,8 @@ def init_state():
         "ylim_start_zero":  False,
         "vline_on":         False,
         "vline_x":          0,
+        "custom_yticks":        "",
+        "custom_yticks_parsed": None,
         # 预览调节
         "legend_x":         0.98,
         "legend_y":         0.98,
@@ -1039,6 +1010,13 @@ elif step == 4:
         )
         ylim_start_zero = "从 0 开始" in ylim_mode
 
+        custom_yticks_input = st.text_input(
+            "自定义纵轴刻度（用逗号分隔，留空则自动）",
+            value=st.session_state.get("custom_yticks", ""),
+            key="custom_yticks_input",
+            placeholder="例如：-10,-5,0,5",
+        )
+
     # 垂直虚线设置
     st.markdown("---")
     st.markdown("**垂直分割线**（可选）")
@@ -1072,12 +1050,28 @@ elif step == 4:
             st.rerun()
     with col_next:
         if st.button("🚀 生成图形", type="primary", key="btn_s4"):
+            # 解析自定义纵轴刻度
+            custom_yticks = None
+            _raw = custom_yticks_input.strip()
+            if _raw:
+                try:
+                    custom_yticks = [float(v.strip()) for v in _raw.split(",") if v.strip() != ""]
+                    custom_yticks = sorted(set(custom_yticks))
+                    if len(custom_yticks) < 2:
+                        st.error("❌ 自定义刻度至少需要 2 个数值，将忽略此设置并使用自动刻度。")
+                        custom_yticks = None
+                except ValueError:
+                    st.error("❌ 自定义刻度格式有误，请用逗号分隔的数字（如 -10,-5,0,5），将忽略此设置。")
+                    custom_yticks = None
+
             st.session_state["xlabel"]         = xlabel
             st.session_state["ylabel"]         = ylabel
             st.session_state["panel_label"]    = panel_label
             st.session_state["ylim_start_zero"] = ylim_start_zero
             st.session_state["vline_on"]       = vline_on
             st.session_state["vline_x"]        = vline_x
+            st.session_state["custom_yticks"]  = _raw
+            st.session_state["custom_yticks_parsed"] = custom_yticks
             st.session_state["step"]           = 5
             st.rerun()
 
@@ -1152,6 +1146,7 @@ elif step == 5:
             legend_y       = st.session_state["legend_y"],
             fig_width      = st.session_state["fig_width"],
             show_errbar    = st.session_state["show_errbar"],
+            custom_yticks  = st.session_state.get("custom_yticks_parsed"),
         )
 
         st.image(result["png"], use_container_width=True)
