@@ -729,10 +729,14 @@ elif step == 2:
                     st.session_state["x_numeric"] = (num_t is not None)
                     if num_t is None:
                         cats = list(dict.fromkeys(df[cols[2]].astype(str).tolist()))
-                        st.session_state["x_cats"] = cats
-                        st.info(f"ℹ️ 时间点为**定性变量**，将按等间距排列：{' → '.join(cats)}")
+                        st.session_state["x_cats"] = sort_time_categories(cats)
+                        st.info(f"ℹ️ 时间点为**定性变量**，将按时间升序排列：{' → '.join(sort_time_categories(cats))}")
                     else:
+                        st.session_state["x_cats"] = []   # 清空陈旧的分类列表，避免跨数据集污染
                         st.info(f"ℹ️ 时间点为**定量变量**，将按数值比例排列坐标轴")
+                    # 清空可能残留自上一次上传的虚线位置设置
+                    st.session_state["vline_x"] = 0
+                    st.session_state["vline_on"] = False
 
                     col_back, col_next = st.columns([1, 5])
                     with col_back:
@@ -799,13 +803,18 @@ elif step == 2:
                     if num_t is not None:
                         df["time"] = num_t
                         st.session_state["x_numeric"] = True
+                        st.session_state["x_cats"] = []   # 清空陈旧分类列表
                         st.info("ℹ️ 时间点为**定量变量**，将按数值比例排列坐标轴")
                     else:
                         st.session_state["x_numeric"] = False
                         cats = list(dict.fromkeys(df["time"].astype(str).tolist()))
-                        st.session_state["x_cats"] = cats
+                        cats_sorted = sort_time_categories(cats)
+                        st.session_state["x_cats"] = cats_sorted
                         df["time"] = df["time"].astype(str)
-                        st.info(f"ℹ️ 时间点为**定性变量**，将按等间距排列：{' → '.join(cats)}")
+                        st.info(f"ℹ️ 时间点为**定性变量**，将按时间升序排列：{' → '.join(cats_sorted)}")
+                    # 清空可能残留自上一次上传的虚线位置设置
+                    st.session_state["vline_x"] = 0
+                    st.session_state["vline_on"] = False
 
                     groups = list(dict.fromkeys(df["group"].astype(str).tolist()))
                     df["group"] = df["group"].astype(str)
@@ -950,10 +959,14 @@ elif step == "run_stat":
     if num_t is not None:
         plot_df["time"] = num_t
         st.session_state["x_numeric"] = True
+        st.session_state["x_cats"] = []   # 清空陈旧分类列表
     else:
         st.session_state["x_numeric"] = False
         cats = list(dict.fromkeys(plot_df["time"].astype(str).tolist()))
-        st.session_state["x_cats"] = cats
+        st.session_state["x_cats"] = sort_time_categories(cats)
+    # 清空可能残留自上一次计算的虚线位置设置
+    st.session_state["vline_x"] = 0
+    st.session_state["vline_on"] = False
 
     groups = list(dict.fromkeys(
         [str(g) for g in raw_df[g_col].unique()]
